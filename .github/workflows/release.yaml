@@ -691,7 +691,7 @@ jobs:
 
   publish-checksums:
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && github.repository == 'router-for-me/CLIProxyAPI'
     needs:
       - build-hosted
       - build-linux-glibc

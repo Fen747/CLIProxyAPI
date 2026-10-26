@@ -149,9 +149,13 @@ class Releases:
             with binary.open("rb") as installed:
                 verify_binary(installed, manifest["binary_sha256"])
             binary.chmod(0o755)
-            (directory / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            metadata = directory / "manifest.json"
+            metadata.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            metadata.chmod(0o600)
             if license_data is not None:
-                (directory / "LICENSE").write_bytes(license_data)
+                notice = directory / "LICENSE"
+                notice.write_bytes(license_data)
+                notice.chmod(0o644)
             os.rename(directory, destination)
         return True
 
@@ -248,14 +252,16 @@ class UserService:
         return result.stdout
 
     def require_stopped(self, executable):
-        properties = dict(line.split("=", 1) for line in self.run("show", "--property=LoadState,ActiveState,ExecStart").splitlines() if "=" in line)
-        if properties.get("LoadState") != "loaded" or properties.get("ActiveState") != "inactive":
+        properties = dict(line.split("=", 1) for line in self.run("show", "--property=LoadState,ActiveState,ExecStart,MainPID,ControlPID").splitlines() if "=" in line)
+        if (properties.get("LoadState") != "loaded" or properties.get("ActiveState") not in ("inactive", "failed")
+                or properties.get("MainPID") != "0" or properties.get("ControlPID") != "0"):
             raise ValueError("Drain and stop the service before activation; this tool will not stop live work")
         match = re.search(r"(?:^|[ {])path=([^ ;]+)", properties.get("ExecStart", ""))
         if match is None or Path(match[1]) != executable:
             raise ValueError("Service ExecStart does not use the managed current/cli-proxy-api path")
 
     def start(self):
+        self.run("reset-failed")
         self.run("start")
 
     def stop(self):

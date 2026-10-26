@@ -86,10 +86,12 @@ currently serving process to initiate an update.
   observed version and source commit.
 * `stage` verifies an explicit archive SHA256, an allowlisted three-file archive,
   its manifest, executable architecture and binary checksum. It installs the
-  release, including its license notice, without selecting it. Repeating an identical stage is harmless;
-  replacing an existing release's contents is refused.
+  release, including its license notice, without selecting it. Repeating an
+  identical stage is harmless; replacing an existing release's contents is refused.
 * `activate` requires an **already stopped**, loaded systemd user service whose
-  `ExecStart` uses the managed `current/cli-proxy-api` path. It preserves a
+  `ExecStart` uses the managed `current/cli-proxy-api` path. A failed unit with
+  no main/control process also qualifies for recovery; start limits are reset
+  before starting a binary. The tool preserves a
   `previous` target, switches `current` atomically and starts the service. An
   authenticated loopback health check must report the expected version and
   commit; a failed candidate is stopped and the previous binary restarted and

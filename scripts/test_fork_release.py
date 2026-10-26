@@ -2,6 +2,7 @@ import hashlib
 import http.server
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -115,6 +116,15 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Another release"):
                 self.manager.stage(archive, checksum, apply=True)
 
+    def test_group_writable_umask_does_not_make_release_metadata_unusable(self):
+        previous_umask = os.umask(0o002)
+        try:
+            archive, checksum, _ = self.archive()
+            self.manager.stage(archive, checksum, apply=True)
+            self.assertFalse(self.manager.stage(archive, checksum, apply=True)["changed"])
+        finally:
+            os.umask(previous_umask)
+
     def test_activation_refuses_running_service_without_changing_links(self):
         original = self.adopted()
         candidate = self.staged()
@@ -201,10 +211,45 @@ class ReleaseTests(unittest.TestCase):
         with patch("fork_release.sys.platform", "linux"), patch("fork_release.platform.machine", return_value="x86_64"), patch("fork_release.os.getuid", return_value=1000):
             service = UserService("proxy.service")
         executable_path = self.manager.root / "current" / "cli-proxy-api"
-        service.run = lambda *_: f"LoadState=loaded\nActiveState=inactive\nExecStart={{ path={executable_path} ; argv[]={executable_path} --config config.yaml ; }}\n"
+        service.run = lambda *_: f"LoadState=loaded\nActiveState=inactive\nMainPID=0\nControlPID=0\nExecStart={{ path={executable_path} ; argv[]={executable_path} --config config.yaml ; }}\n"
         service.require_stopped(executable_path)
         with self.assertRaisesRegex(ValueError, "ExecStart"):
             service.require_stopped(self.directory / "other-binary")
+
+    def test_failed_systemd_candidate_can_be_replaced_by_the_previous_binary(self):
+        original = self.adopted()
+        candidate = self.staged()
+        with patch("fork_release.sys.platform", "linux"), patch("fork_release.platform.machine", return_value="x86_64"), patch("fork_release.os.getuid", return_value=1000):
+            service = UserService("proxy.service")
+        state = "inactive"
+        starts = 0
+        resets = 0
+
+        def run(*args):
+            nonlocal state, starts, resets
+            if args[0] == "show":
+                path = self.manager.root / "current" / "cli-proxy-api"
+                return f"LoadState=loaded\nActiveState={state}\nMainPID=0\nControlPID=0\nExecStart={{ path={path} ; }}\n"
+            if args[0] == "reset-failed":
+                resets += 1
+                state = "inactive"
+            elif args[0] == "start":
+                starts += 1
+                state = "failed" if starts == 1 else "active"
+            elif args[0] == "stop" and state != "failed":
+                state = "inactive"
+            return ""
+
+        def health(manifest):
+            if manifest["release"] == candidate:
+                raise RuntimeError("candidate crashed")
+
+        service.run = run
+        with self.assertRaisesRegex(RuntimeError, "previous release restored and healthy"):
+            self.manager.activate(candidate, service, health, apply=True)
+        self.assertEqual(self.manager.target("current"), original)
+        self.assertEqual(state, "active")
+        self.assertEqual(resets, 2)
 
     def test_health_rejects_remote_origins_and_unprotected_key_files(self):
         key = self.directory / "management.key"
