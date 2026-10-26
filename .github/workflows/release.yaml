@@ -15,6 +15,7 @@ env:
 
 jobs:
   prepare-release:
+    if: github.repository == 'router-for-me/CLIProxyAPI'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

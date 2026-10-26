@@ -1,0 +1,82 @@
+name: fork-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Fork version (for example 8.0.29-fleet.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'Fen747/CLIProxyAPI' && github.ref == 'refs/heads/fleet'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate immutable version
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-fleet\.[0-9]+$ ]]
+          tag="fleet-v$VERSION"
+          if [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq 'length')" != 0 ]]; then
+            echo "Refusing to overwrite an existing release tag" >&2
+            exit 1
+          fi
+      - name: Test release operations
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Build portable Linux release from the checked-out commit
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/bundle
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags="-s -w -X main.Version=$VERSION -X main.Commit=$GITHUB_SHA -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o dist/bundle/cli-proxy-api ./cmd/server
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          binary = Path('dist/bundle/cli-proxy-api')
+          manifest = {'schema': 1, 'release': 'fleet-v' + os.environ['VERSION'],
+                      'version': os.environ['VERSION'], 'commit': os.environ['GITHUB_SHA'],
+                      'platform': 'linux-amd64', 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
+          Path('dist/bundle/manifest.json').write_text(json.dumps(manifest, sort_keys=True) + '\n')
+          PY
+          archive="cliproxy-fleet-v${VERSION}-linux-amd64.tar.gz"
+          cp LICENSE dist/bundle/LICENSE
+          tar -C dist/bundle -czf "dist/$archive" cli-proxy-api manifest.json LICENSE
+          (cd dist && sha256sum "$archive" > checksums.txt)
+          checksum="$(sha256sum "dist/$archive" | cut -d ' ' -f 1)"
+          python3 scripts/fork_release.py --root "$RUNNER_TEMP/release-smoke" stage \
+            --archive "dist/$archive" --sha256 "$checksum" --apply
+          cp scripts/fork_release.py dist/fork_release.py
+          (cd dist && sha256sum fork_release.py >> checksums.txt)
+      - name: Publish fork assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tag="fleet-v$VERSION"
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq 'length')" == 0 ]]
+          gh release create "$tag" --target "$GITHUB_SHA" --draft \
+            --title "Fleet proxy $VERSION" --notes "Linux amd64, no plugins. Source commit: $GITHUB_SHA. No automatic deployment."
+          gh release upload "$tag" dist/*.tar.gz dist/checksums.txt dist/fork_release.py
+          gh release edit "$tag" --draft=false

@@ -37,6 +37,7 @@ GEMINI.md
 AGENTS.override.md
 
 # Tooling metadata
+scripts/__pycache__/
 .vscode/*
 .worktrees/
 .codex/*
