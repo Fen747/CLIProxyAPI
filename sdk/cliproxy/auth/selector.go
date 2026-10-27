@@ -912,6 +912,7 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
 	fallback          Selector
+	initialQuota      *InitialQuotaPolicy
 	cache             *SessionCache
 	matcher           *cliproxysession.MerklePrefixMatcher
 	affinityRefs      *atomic.Int32
@@ -1045,10 +1046,11 @@ func (s *SessionAffinitySelector) shouldPreserveBindingWhenUnavailable(ctx conte
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
-	Fallback         Selector
-	TTL              time.Duration
-	SubagentAffinity *bool
-	RebindOn         string
+	QuotaAwareInitial bool
+	Fallback          Selector
+	TTL               time.Duration
+	SubagentAffinity  *bool
+	RebindOn          string
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -1074,7 +1076,12 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 	rebindOnQuotaOnly := normalizeSessionAffinityRebindOn(cfg.RebindOn) == SessionAffinityRebindOnQuota
 	refs := &atomic.Int32{}
 	refs.Store(1)
+	var initialQuota *InitialQuotaPolicy
+	if cfg.QuotaAwareInitial {
+		initialQuota = newInitialQuotaPolicy()
+	}
 	return &SessionAffinitySelector{
+		initialQuota:      initialQuota,
 		fallback:          cfg.Fallback,
 		cache:             NewSessionCache(cfg.TTL),
 		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
@@ -1215,8 +1222,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return auth, nil
 	}
 
+	hadParentBinding := false
 	if fallbackKey != "" {
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
+			hadParentBinding = !isSubagent || s.subagentAffinity
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
@@ -1245,7 +1254,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	auth, err := s.pickInitial(ctx, provider, model, opts, fallbackAuths, !hadParentBinding)
 	if err != nil {
 		return nil, err
 	}
@@ -1295,7 +1304,8 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	}
 
 	var preservedAuthID string
-	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
+	match, matched := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength)
+	if matched {
 		for _, auth := range available {
 			if auth == nil || auth.ID != match.AuthID {
 				continue
@@ -1342,7 +1352,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	}
 
 	fallbackAuths := highestPriorityAuths(available)
-	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	auth, errPick := s.pickInitial(ctx, provider, model, opts, fallbackAuths, !matched)
 	if errPick != nil {
 		return nil, true, errPick
 	}
@@ -1633,6 +1643,7 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 
 // OnResult handles session affinity binding or release based on execution outcome.
 func (s *SessionAffinitySelector) OnResult(res Result) {
+	releaseInitialQuotaReservation(res.Options.Metadata)
 	if s == nil || res.AuthID == "" {
 		return
 	}

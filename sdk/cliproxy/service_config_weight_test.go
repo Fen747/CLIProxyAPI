@@ -75,3 +75,25 @@ func TestApplyManagerConfigStopsReplacedServiceAffinitySelector(t *testing.T) {
 		t.Fatal("expected replaced selector to be stopped during routing config apply")
 	}
 }
+
+func TestQuotaAwareRoutingHotReloadPreservesPolicyAndCanDisable(t *testing.T) {
+	cfg := &internalconfig.Config{Routing: internalconfig.RoutingConfig{SessionAffinity: true, QuotaAwareInitial: true}}
+	service := &Service{coreManager: coreauth.NewManager(nil, nil, nil)}
+	t.Cleanup(service.coreManager.StopAutoRefresh)
+	if !service.applyManagerConfig(context.Background(), configCommit{cfg: cfg, sequence: 1}) {
+		t.Fatal("enable failed")
+	}
+	policy := service.coreManager.InitialQuotaPolicy()
+	if policy == nil {
+		t.Fatal("policy not enabled")
+	}
+	cfg2 := *cfg
+	cfg2.Routing.Strategy = "weighted-round-robin"
+	if !service.applyManagerConfig(context.Background(), configCommit{cfg: &cfg2, sequence: 2}) || service.coreManager.InitialQuotaPolicy() != policy {
+		t.Fatal("routing reload replaced policy")
+	}
+	cfg2.Routing.QuotaAwareInitial = false
+	if !service.applyManagerConfig(context.Background(), configCommit{cfg: &cfg2, sequence: 3}) || service.coreManager.InitialQuotaPolicy() != nil {
+		t.Fatal("disable failed")
+	}
+}

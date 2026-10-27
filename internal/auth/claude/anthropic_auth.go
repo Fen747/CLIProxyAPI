@@ -27,6 +27,7 @@ const (
 	TokenURL        = "https://platform.claude.com/v1/oauth/token"
 	RefreshTokenURL = "https://platform.claude.com/v1/oauth/token"
 	ProfileURL      = "https://api.anthropic.com/api/oauth/profile"
+	UsageURL        = "https://api.anthropic.com/api/oauth/usage"
 	// RolesURL is the claude_cli role endpoint the native client queries right
 	// after a successful token exchange, alongside the profile lookup.
 	RolesURL         = "https://api.anthropic.com/api/oauth/claude_cli/roles"
@@ -241,6 +242,9 @@ func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, a
 	applyClaudeOAuthAxiosHeaders(req)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Cache-Control", "no-cache")
+	if endpoint == UsageURL {
+		req.Header.Set("Anthropic-Beta", "oauth-2025-04-20")
+	}
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -259,6 +263,25 @@ func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, a
 		return nil, fmt.Errorf("fetch Claude OAuth %s failed with status %d", label, resp.StatusCode)
 	}
 	return body, nil
+}
+
+// FetchOAuthUsage reads subscription counters without sending inference or refreshing tokens.
+// Redirects are rejected so a control-plane response cannot relocate credentials.
+func (o *ClaudeAuth) FetchOAuthUsage(ctx context.Context, accessToken string) (json.RawMessage, error) {
+	if o == nil || o.httpClient == nil {
+		return nil, errors.New("Claude usage HTTP client is nil")
+	}
+	client := *o.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	reader := &ClaudeAuth{httpClient: &client}
+	body, err := reader.fetchOAuthControlPlaneJSON(ctx, UsageURL, accessToken, "usage")
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(body) {
+		return nil, errors.New("invalid Claude usage JSON")
+	}
+	return json.RawMessage(body), nil
 }
 
 // FetchOAuthProfile retrieves the account identity associated with an OAuth access token.
