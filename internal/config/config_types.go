@@ -387,6 +387,10 @@ type RoutingConfig struct {
 	// Requires SessionAffinity; existing bindings and failover retain their policy.
 	QuotaAwareInitial bool `yaml:"quota-aware-initial,omitempty" json:"quota-aware-initial,omitempty"`
 
+	// ClaudeWindowPriming permits bounded, pinned inference to start inactive Claude windows.
+	// Requires SessionAffinity and QuotaAwareInitial. Disabled by default.
+	ClaudeWindowPriming bool `yaml:"claude-window-priming,omitempty" json:"claude-window-priming,omitempty"`
+
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`

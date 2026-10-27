@@ -38,9 +38,10 @@ func ClaudeQuotaEligible(a *Auth) bool {
 }
 
 type quotaWindow struct {
-	known bool
-	used  float64
-	reset time.Time
+	inactive bool
+	known    bool
+	used     float64
+	reset    time.Time
 }
 type initialQuotaObservation struct {
 	at                               time.Time
@@ -95,6 +96,7 @@ func (p *InitialQuotaPolicy) Observe(a *Auth, body []byte, at time.Time) error {
 		}
 		target.known = true
 		if strings.TrimSpace(string(raw)) == "null" {
+			target.inactive = true
 			continue
 		}
 		var value struct {
@@ -301,4 +303,29 @@ func releaseInitialQuotaReservation(metadata map[string]any) {
 	delete(reservation.policy.reservations, reservation.ticket)
 	reservation.policy.mu.Unlock()
 	delete(metadata, initialQuotaReservationKey)
+}
+
+// WindowPrimingDecision requires an explicit inactive window and a fresh OAuth
+// observation. Zero utilization alone never authorizes generation. A positive
+// reset is returned for confirming an already active five-hour window.
+func (p *InitialQuotaPolicy) WindowPrimingDecision(a *Auth, now time.Time) (bool, time.Time) {
+	if !ClaudeQuotaEligible(a) || authWeight(a) <= 0 {
+		return false, time.Time{}
+	}
+	p.mu.Lock()
+	observation, ok := p.observations[quotaIdentityOf(a)]
+	p.mu.Unlock()
+	if !ok || observation.at.After(now) || now.Sub(observation.at) > time.Minute || !observation.fiveHour.known {
+		return false, time.Time{}
+	}
+	if a.Quota.ObservedAt.After(observation.at) && !a.Quota.ObservedAt.After(now) && now.Sub(a.Quota.ObservedAt) <= time.Minute {
+		augmentQuotaWindow(&observation.fiveHour, a.Quota.Signals, "5h")
+		augmentQuotaWindow(&observation.sevenDay, a.Quota.Signals, "7d")
+	}
+	if observation.fiveHour.reset.After(now) {
+		return false, observation.fiveHour.reset
+	}
+	weekly := observation.sevenDay
+	safeWeekly := weekly.known && weekly.used < .98 && (weekly.reset.IsZero() || weekly.reset.After(now))
+	return observation.fiveHour.inactive && safeWeekly, time.Time{}
 }

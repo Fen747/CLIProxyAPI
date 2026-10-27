@@ -356,3 +356,30 @@ func TestMaintenanceAllowsSidebandAndHangupForAdmittedLiveCall(t *testing.T) {
 		t.Fatalf("hangup did not complete drainage: %s", response.Body.String())
 	}
 }
+
+func TestMaintenanceIncludesServiceOwnedBackgroundWork(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management")
+	server := newTestServerWithOptions(t, WithLocalManagementPassword("test-management"))
+	done, err := server.BeginBackgroundWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer done()
+	response := maintenanceCall(t, server, http.MethodPut, testMaintenanceToken, "test-management")
+	var state struct {
+		Maintenance maintenance.State `json:"maintenance"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || state.Maintenance.Active != 1 || state.Maintenance.Ready {
+		t.Fatalf("background work missing from drain: %s", response.Body.String())
+	}
+	if _, err := server.BeginBackgroundWork(); err == nil {
+		t.Fatal("background work admitted during drain")
+	}
+	done()
+	if !server.maintenance.State().Ready {
+		t.Fatal("completed background work blocked drain")
+	}
+}

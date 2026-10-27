@@ -309,7 +309,7 @@ proxy-url: old
 
 func TestV8MigrationCommentsUnknownNestedFields(t *testing.T) {
 	raw := []byte(`server: {port: 8317}
-routing: {strategy: fill-first, session-affinity: true, quota-aware-initial: true}
+routing: {strategy: fill-first, session-affinity: true, quota-aware-initial: true, claude-window-priming: true}
 oauth:
   providers:
     codex:
@@ -335,7 +335,7 @@ oauth:
 		t.Fatalf("unknown nested field was not preserved as a comment: %s", migrated)
 	}
 	cfg, err := ParseConfigBytes(migrated)
-	if err != nil || cfg.Routing.Strategy != "fill-first" || !cfg.Routing.SessionAffinity || !cfg.Routing.QuotaAwareInitial || !cfg.Codex.DisableCodexCloaking {
+	if err != nil || cfg.Routing.Strategy != "fill-first" || !cfg.Routing.SessionAffinity || !cfg.Routing.QuotaAwareInitial || !cfg.Routing.ClaudeWindowPriming || !cfg.Codex.DisableCodexCloaking {
 		t.Fatalf("migration changed known settings: cfg=%+v error=%v", cfg, err)
 	}
 	remigrated, _, err := NormalizeConfigLayout(migrated, true)

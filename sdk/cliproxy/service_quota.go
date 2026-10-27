@@ -14,25 +14,29 @@ import (
 const quotaPollConcurrency = 4
 
 type quotaPollAccount struct {
-	auth   *coreauth.Auth
-	policy *coreauth.InitialQuotaPolicy
-	proxy  string
-	next   time.Time
-	cancel context.CancelFunc
+	primingWaiting bool
+	auth           *coreauth.Auth
+	policy         *coreauth.InitialQuotaPolicy
+	proxy          string
+	next           time.Time
+	cancel         context.CancelFunc
 }
 type quotaPollResult struct {
-	account *quotaPollAccount
-	started time.Time
-	body    []byte
-	err     error
+	prepared *coreauth.Auth
+	account  *quotaPollAccount
+	started  time.Time
+	body     []byte
+	err      error
 }
 
 type quotaPoller struct {
-	accounts map[string]*quotaPollAccount
-	active   map[*quotaPollAccount]bool
-	results  chan quotaPollResult
-	workers  sync.WaitGroup
-	fetch    func(context.Context, *config.Config, *coreauth.Auth) ([]byte, error)
+	prepare      func(context.Context, *config.Config, *coreauth.Auth) (*coreauth.Auth, error)
+	pausedAuthID string
+	accounts     map[string]*quotaPollAccount
+	active       map[*quotaPollAccount]bool
+	results      chan quotaPollResult
+	workers      sync.WaitGroup
+	fetch        func(context.Context, *config.Config, *coreauth.Auth) ([]byte, error)
 }
 
 func newQuotaPoller() *quotaPoller {
@@ -82,7 +86,7 @@ func (p *quotaPoller) scan(ctx context.Context, cfg *config.Config, policy *core
 				break
 			}
 		}
-		if alreadyReading || state.cancel != nil || now.Before(state.next) || len(p.active) >= quotaPollConcurrency {
+		if a.ID == p.pausedAuthID || alreadyReading || state.cancel != nil || now.Before(state.next) || len(p.active) >= quotaPollConcurrency {
 			continue
 		}
 		requestCtx, cancel := context.WithCancel(ctx)
@@ -91,8 +95,16 @@ func (p *quotaPoller) scan(ctx context.Context, cfg *config.Config, policy *core
 		p.workers.Add(1)
 		go func(state *quotaPollAccount) {
 			defer p.workers.Done()
-			body, err := p.fetch(requestCtx, cfg, state.auth)
-			result := quotaPollResult{state, now, body, err}
+			prepared := state.auth
+			var err error
+			if p.prepare != nil {
+				prepared, err = p.prepare(requestCtx, cfg, state.auth)
+			}
+			var body []byte
+			if err == nil {
+				body, err = p.fetch(requestCtx, cfg, prepared)
+			}
+			result := quotaPollResult{account: state, started: now, body: body, err: err, prepared: prepared}
 			select {
 			case p.results <- result:
 			case <-ctx.Done():
@@ -101,16 +113,19 @@ func (p *quotaPoller) scan(ctx context.Context, cfg *config.Config, policy *core
 	}
 }
 
-func (p *quotaPoller) complete(result quotaPollResult, now time.Time) {
+func (p *quotaPoller) complete(result quotaPollResult, now time.Time) bool {
 	state := result.account
 	delete(p.active, state)
 	state.cancel()
 	state.cancel = nil
 	if p.accounts[state.auth.ID] != state {
-		return
+		return false
 	} // Removed/replaced credentials cannot publish.
 	err := result.err
 	if err == nil {
+		if result.prepared != nil {
+			state.auth = result.prepared
+		}
 		err = state.policy.Observe(state.auth, result.body, result.started)
 	}
 	state.next = state.policy.NextPoll(state.auth, now, err == nil)
@@ -118,6 +133,7 @@ func (p *quotaPoller) complete(result quotaPollResult, now time.Time) {
 		// Do not log response bodies, token-bearing errors or credential metadata.
 		log.WithField("auth_id", state.auth.ID).Debug("Claude quota read unavailable; retaining fallback routing")
 	}
+	return err == nil
 }
 
 func (p *quotaPoller) stop() {
@@ -127,7 +143,7 @@ func (p *quotaPoller) stop() {
 	p.workers.Wait()
 }
 
-// startQuotaObserver performs only fixed-endpoint control-plane GETs. It starts
+// startQuotaObserver reads usage and optionally primes explicitly inactive windows. It starts
 // even when disabled so config hot reloads can enable it without a restart.
 func (s *Service) startQuotaObserver(ctx context.Context) {
 	if s.coreManager == nil {
@@ -144,11 +160,28 @@ func (s *Service) startQuotaObserver(ctx context.Context) {
 	go func() {
 		defer close(done)
 		poller := newQuotaPoller()
+		poller.prepare = func(ctx context.Context, cfg *config.Config, a *coreauth.Auth) (*coreauth.Auth, error) {
+			if primingEnabled(cfg) {
+				return s.coreManager.PrepareClaudeWindowPrimingAuth(ctx, a)
+			}
+			return a, nil
+		}
 		defer poller.stop()
+		primer := newQuotaPrimer(s.coreManager, s.server.BeginBackgroundWork, poller.fetch)
+		if cfg := s.currentConfig(); cfg != nil {
+			primer.authDir = cfg.AuthDir
+		}
+		defer primer.stop()
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		scan := func() {
-			poller.scan(ctx, s.currentConfig(), s.coreManager.InitialQuotaPolicy(), s.coreManager.List(), time.Now())
+			cfg, auths := s.currentConfig(), s.coreManager.List()
+			primer.reconcile(cfg, auths)
+			poller.pausedAuthID = ""
+			if primer.active != nil {
+				poller.pausedAuthID = primer.active.auth.ID
+			}
+			poller.scan(ctx, cfg, s.coreManager.InitialQuotaPolicy(), auths, time.Now())
 		}
 		scan()
 		for {
@@ -160,7 +193,20 @@ func (s *Service) startQuotaObserver(ctx context.Context) {
 			case result := <-poller.results:
 				// Reconcile config and credential replacements before accepting a result.
 				scan()
-				poller.complete(result, time.Now())
+				now := time.Now()
+				poller.completeUsage(ctx, primer, s.currentConfig(), result, now)
+			case result := <-primer.results:
+				scan()
+				now := time.Now()
+				confirmed := primer.complete(result, now)
+				poller.wakePrimingWaiters(now)
+				if account := poller.accounts[result.job.auth.ID]; account != nil && samePrimingCredential(account.auth, result.job.auth) {
+					if confirmed {
+						account.next = account.policy.NextPoll(account.auth, now, true)
+					} else {
+						account.next = now.Add(5 * time.Minute)
+					}
+				}
 			}
 		}
 	}()
@@ -174,5 +220,29 @@ func (s *Service) stopQuotaObserver() {
 	if cancel != nil {
 		cancel()
 		<-done
+	}
+}
+
+// wakePrimingWaiters rechecks accounts deferred by the single priming slot,
+// rather than leaving their otherwise hourly read delayed for a full hour.
+func (p *quotaPoller) wakePrimingWaiters(now time.Time) {
+	for _, account := range p.accounts {
+		if account.primingWaiting {
+			account.primingWaiting = false
+			account.next = now
+		}
+	}
+}
+
+func (p *quotaPoller) completeUsage(ctx context.Context, primer *quotaPrimer, cfg *config.Config, result quotaPollResult, now time.Time) {
+	if !p.complete(result, now) {
+		return
+	}
+	if primer.observe(ctx, cfg, result.account.policy, result.account.auth, now) == primingDeferred {
+		if primer.active != nil {
+			result.account.primingWaiting = true
+		} else {
+			result.account.next = now.Add(5 * time.Minute)
+		}
 	}
 }
