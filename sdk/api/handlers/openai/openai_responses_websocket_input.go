@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/maintenance"
 	"github.com/tidwall/gjson"
 )
 
@@ -120,6 +121,17 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 					}
 					continue
 				}
+			}
+			// Interrupts may finish existing work; new steering/create frames must
+			// not extend a draining stream. Keep the current response alive.
+			if maintenance.Draining(ctx) {
+				if _, errWrite := writeResponsesWebsocketError(writer, nil, &interfaces.ErrorMessage{
+					StatusCode: http.StatusServiceUnavailable, Error: maintenance.ErrDraining,
+				}); errWrite != nil {
+					cancel(errWrite)
+					return
+				}
+				continue
 			}
 			select {
 			case input <- cliproxyexecutor.WebsocketInput{Payload: payload}:

@@ -28,6 +28,9 @@ func (s *Server) registerManagementV8Routes() {
 	}
 
 	v8.GET("/server/latest-version", s.mgmt.GetLatestVersion)
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		v8.Handle(method, "/server/maintenance", s.maintenanceControl)
+	}
 	v8.POST("/requests/api-call", s.mgmt.APICall)
 	v8.POST("/routing/cooldown/reset", s.mgmt.ResetQuota)
 	v8.GET("/routing/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)

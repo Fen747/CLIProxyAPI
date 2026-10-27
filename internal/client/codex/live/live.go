@@ -166,6 +166,16 @@ func (h *Handler) currentMediaRelay() (mediaRelayFactory, error) {
 	return relay, relayErr
 }
 
+// ActiveSessions includes calls that outlive their HTTP bootstrap request.
+func (h *Handler) ActiveSessions() int {
+	if h == nil || h.sessions == nil {
+		return 0
+	}
+	h.sessions.mu.Lock()
+	defer h.sessions.mu.Unlock()
+	return h.sessions.active
+}
+
 // Close releases all active Codex live sessions.
 func (h *Handler) Close() {
 	if h == nil {
