@@ -1225,7 +1225,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	hadParentBinding := false
 	if fallbackKey != "" {
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
-			hadParentBinding = true
+			hadParentBinding = !isSubagent || s.subagentAffinity
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {

@@ -166,6 +166,15 @@ func (p *InitialQuotaPolicy) NextPoll(a *Auth, lastAttempt time.Time, succeeded 
 	return next
 }
 
+type initialQuotaRetryRoundKey struct{}
+
+func withInitialQuotaRetryRound(ctx context.Context, round int) context.Context {
+	if round <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, initialQuotaRetryRoundKey{}, true)
+}
+
 type initialQuotaSelectionKey struct{}
 type initialQuotaSelection struct {
 	retry  bool
@@ -177,7 +186,8 @@ func (m *Manager) withInitialQuotaSelection(ctx context.Context, selector Select
 	if !ok || s.initialQuota == nil {
 		return ctx
 	}
-	selection := initialQuotaSelection{retry: len(tried) > 0, models: make(map[string]string, len(auths))}
+	retryRound, _ := ctx.Value(initialQuotaRetryRoundKey{}).(bool)
+	selection := initialQuotaSelection{retry: retryRound || len(tried) > 0, models: make(map[string]string, len(auths))}
 	for _, a := range auths {
 		selection.models[a.ID] = m.selectionModelKeyForAuth(a, model)
 	}

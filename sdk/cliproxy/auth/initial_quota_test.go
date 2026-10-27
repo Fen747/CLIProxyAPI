@@ -311,3 +311,67 @@ func TestManagerInitialQuotaResolvesAliasAndSuppressesRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestInitialQuotaExecutionRetryRoundsUseFailover(t *testing.T) {
+	for _, kind := range []string{"execute", "count", "stream"} {
+		t.Run(kind, func(t *testing.T) {
+			p, now, auths := quotaTestPolicy(t)
+			s := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, QuotaAwareInitial: true})
+			s.initialQuota = p
+			manager := NewManager(nil, s, nil)
+			t.Cleanup(manager.StopAutoRefresh)
+			manager.SetRetryConfig(1, 0, 0)
+			executor := &retryRoundCallExecutor{identifier: "claude"}
+			manager.RegisterExecutor(executor)
+			model := "claude-opus-4-6"
+			for _, a := range auths {
+				a.Metadata["disable_cooling"] = true
+				if _, err := manager.Register(WithSkipPersist(context.Background()), a); err != nil {
+					t.Fatal(err)
+				}
+				registry.GetGlobalRegistry().RegisterClient(a.ID, "claude", []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
+			}
+			for _, a := range manager.List() {
+				reset := 4 * time.Hour
+				if a.ID == "b" {
+					reset = time.Hour
+				}
+				if err := p.Observe(a, quotaTestBody(now, 10, reset), now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			req := cliproxyexecutor.Request{Model: model}
+			opts := cliproxyexecutor.Options{Headers: http.Header{"X-Task-Id": {"retry-round"}}, Metadata: map[string]any{}}
+			var err error
+			switch kind {
+			case "execute":
+				_, err = manager.Execute(context.Background(), []string{"claude"}, req, opts)
+			case "count":
+				_, err = manager.ExecuteCount(context.Background(), []string{"claude"}, req, opts)
+			case "stream":
+				_, err = manager.ExecuteStream(context.Background(), []string{"claude"}, req, opts)
+			}
+			ids := executor.ids(kind)
+			if err == nil || fmt.Sprint(ids) != "[b a a b]" {
+				t.Fatalf("retry rounds=%v error=%v; want quota first, configured failover thereafter", ids, err)
+			}
+		})
+	}
+}
+
+func TestInitialQuotaNewSubagentWithoutParentInheritanceIsCold(t *testing.T) {
+	p, now, auths := quotaTestPolicy(t)
+	_ = p.Observe(auths[1], quotaTestBody(now, 10, time.Hour), now)
+	inherit := false
+	s := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, QuotaAwareInitial: true, SubagentAffinity: &inherit})
+	defer s.Stop()
+	s.initialQuota = p
+	model := "claude-opus-4-6"
+	s.cache.Set("claude::task:parent::"+model, "a")
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Task-Id": {"parent:agent:child"}, "X-Parent-Task-Id": {"parent"}}, Metadata: map[string]any{}}
+	a, err := s.Pick(context.Background(), "claude", model, opts, auths)
+	if err != nil || a == nil || a.ID != "b" {
+		t.Fatalf("non-inheriting subagent=%v/%v, want quota-ranked b", a, err)
+	}
+}

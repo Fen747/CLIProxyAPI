@@ -13,6 +13,7 @@ The default is `false`. Home routing is excluded. This setting hot reloads. New
 bindings use the highest eligible credential priority as before. Explicit session,
 parent/fork and LCP matches remain authoritative, including across routing reloads.
 Unavailable bindings and execution retries retain the configured failover strategy.
+With subagent inheritance disabled, new child bindings are quota-ranked independently.
 No-session requests, API keys, custom upstreams and non-Claude credentials retain
 the configured strategy. A mixed candidate set also falls back to that strategy.
 
