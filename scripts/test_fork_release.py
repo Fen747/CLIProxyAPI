@@ -50,6 +50,7 @@ class FakeMaintenanceAPI:
         self.instance = "original"
         self.pid = 123
         self.supported = True
+        self.durable = True
         self.fail_resume = False
         self.change_instance_on_put = False
         self.methods = []
@@ -67,7 +68,7 @@ class FakeMaintenanceAPI:
         return io.BytesIO(json.dumps({"pid": self.pid, "supported": self.supported, "maintenance": {
             "instance": self.instance, "draining": self.draining, "active": self.active,
             "ready": self.draining and self.active == 0,
-            "durable": True,
+            "durable": self.durable,
         }}).encode())
 
 
@@ -187,6 +188,17 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.manager.target("current"), current)
         self.assertEqual(service.events, [])
         self.assertEqual(api.methods, [])
+
+    def test_same_release_with_closed_admission_requires_explicit_recovery(self):
+        self.adopted()
+        current = self.staged()
+        self.manager.activate(current, FakeService(), lambda _: None, apply=True)
+        service = FakeService(running=True)
+        api = FakeMaintenanceAPI()
+        api.draining = True
+        with self.assertRaisesRegex(ValueError, "admission is closed"):
+            self.manager.activate(current, service, lambda _: None, apply=True, maintenance=Maintenance(api.request))
+        self.assertEqual(service.events, [])
 
     def test_saved_maintenance_cannot_be_bypassed_with_stopped_service_mode(self):
         original = self.adopted()
@@ -523,10 +535,13 @@ class ReleaseTests(unittest.TestCase):
             return response
 
         with patch("fork_release.management_request", return_value=request):
-            with self.assertRaisesRegex(RuntimeError, "remains in maintenance"):
+            with self.assertRaisesRegex(RuntimeError, "admission check failed"):
                 management_health("unused", "unused", wait=0)(manifest)
             management_health("unused", "unused", wait=0, allow_draining=True)(manifest)
             api.draining = False
+            management_health("unused", "unused", wait=0)(manifest)
+            api.supported = False
+            api.durable = False
             management_health("unused", "unused", wait=0)(manifest)
 
     def test_health_authenticates_checks_build_and_refuses_redirects(self):

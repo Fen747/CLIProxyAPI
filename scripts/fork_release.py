@@ -217,11 +217,15 @@ class Releases:
                 raise ValueError("Adopt and verify the existing binary before activating a release")
             if maintenance is None and (self.root / ".maintenance-operation.json").exists():
                 raise ValueError("Recover the saved maintenance operation with resume before switching releases")
+            executable = self.root / "current" / "cli-proxy-api"
             if previous == release:
                 if apply:
+                    if maintenance is not None:
+                        state = maintenance.inspect(service.require_running(executable))
+                        if state["maintenance"]["draining"]:
+                            raise ValueError("Release is already selected but admission is closed; recover with resume")
                     health(manifest)
                 return {"action": "activate", "release": release, "apply": apply, "changed": False}
-            executable = self.root / "current" / "cli-proxy-api"
             old_previous = self.target("previous")
             if maintenance is None:
                 service.require_stopped(executable)
@@ -357,16 +361,17 @@ def management_health(base_url, key_file, wait=10, allow_draining=False):
                     commit = response.headers.get("X-CPA-COMMIT", "")
                     if version == manifest["version"] and len(commit) >= 7 and manifest["commit"].startswith(commit):
                         if manifest.get("maintenance_protocol") == 1 and not allow_draining:
-                            state = Maintenance(request).state()
-                            if state["maintenance"]["draining"]:
-                                raise RuntimeError("Proxy remains in maintenance; resume admission before reporting healthy")
-                        return
+                            state = Maintenance(request).state(require_supported=False)
+                            if not state["maintenance"]["draining"]:
+                                return
+                        else:
+                            return
             except urllib.error.HTTPError as error:
                 error.close()
-            except (OSError, urllib.error.URLError):
+            except (OSError, urllib.error.URLError, RuntimeError):
                 pass
             if time.monotonic() >= deadline:
-                raise RuntimeError("Authenticated health/version check failed")
+                raise RuntimeError("Authenticated health/version or admission check failed")
             time.sleep(0.2)
     return check
 
@@ -384,7 +389,7 @@ class Maintenance:
         self.pid = None
         self.state_file = state_file
 
-    def state(self, method="GET"):
+    def state(self, method="GET", require_supported=True):
         try:
             with self.request(self.path, method, None if method == "GET" else {"token": self.token, "instance": self.instance}) as response:
                 value = json.loads(response.read(4097))
@@ -394,12 +399,14 @@ class Maintenance:
         except (OSError, ValueError, urllib.error.URLError):
             raise RuntimeError("Maintenance control unavailable; no service stop authorized") from None
         state = value.get("maintenance") if isinstance(value, dict) else None
-        if (not isinstance(value, dict) or value.get("supported") is not True or type(value.get("pid")) is not int or not isinstance(state, dict)
+        if (not isinstance(value, dict) or type(value.get("supported")) is not bool or type(value.get("pid")) is not int or not isinstance(state, dict)
                 or not isinstance(state.get("instance"), str) or not state["instance"]
-                or state.get("durable") is not True
+                or type(state.get("durable")) is not bool
                 or type(state.get("active")) is not int or state["active"] < 0
                 or type(state.get("draining")) is not bool or type(state.get("ready")) is not bool):
             raise RuntimeError("Maintenance state invalid or unsupported")
+        if require_supported and (not value["supported"] or not state["durable"]):
+            raise RuntimeError("Maintenance state unsupported for automatic drainage")
         return value
 
     def inspect(self, pid):
