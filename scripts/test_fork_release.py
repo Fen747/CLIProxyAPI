@@ -149,11 +149,15 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.manager.target("current"), original)
 
     def test_unhealthy_candidate_restores_binary_without_restoring_oauth(self):
-        original = self.adopted()
-        candidate = self.staged()
+        older = self.adopted()
+        original = self.staged()
+        service = FakeService()
+        self.manager.activate(original, service, lambda _: None, apply=True)
+        service.stop()
+        service.events.clear()
+        candidate = self.staged("8.0.29-fleet.2")
         token = self.directory / "oauth.json"
         token.write_text("original token")
-        service = FakeService()
 
         def health(manifest):
             if manifest["release"] == candidate:
@@ -163,6 +167,7 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "previous release restored and healthy"):
             self.manager.activate(candidate, service, health, apply=True)
         self.assertEqual(self.manager.target("current"), original)
+        self.assertEqual(self.manager.target("previous"), older)
         self.assertEqual(token.read_text(), "refreshed token")
         self.assertEqual(service.events, ["start", "stop", "start"])
 

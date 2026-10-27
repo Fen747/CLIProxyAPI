@@ -220,6 +220,7 @@ class Releases:
             service.require_stopped(self.root / "current" / "cli-proxy-api")
             if not apply:
                 return {"action": "activate", "from": previous, "release": release, "apply": False}
+            old_previous = self.target("previous")
             # Keep a recovery target even if this operation is killed after the switch.
             self.link("previous", previous)
             self.link("current", release)
@@ -233,6 +234,8 @@ class Releases:
                 self.link("current", previous)
                 service.start()
                 health(self.installed(previous))
+                if old_previous is not None:
+                    self.link("previous", old_previous)
                 raise RuntimeError("Candidate failed; previous release restored and healthy") from error
         return {"action": "activate", "from": previous, "release": release, "apply": True, "changed": True}
 

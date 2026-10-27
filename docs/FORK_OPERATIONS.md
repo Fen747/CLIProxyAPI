@@ -22,12 +22,13 @@ and active Claude and Codex credentials.
 
 Existing operator records describe a Linux amd64 no-plugin executable managed
 by a systemd user service, separate configuration/state directories, and a
-private HTTPS endpoint forwarded to its loopback port. The operator's SSH
-transport timed out during this assessment. The current service unit, executable
-checksum, filesystem permissions and active connections have therefore **not**
-been independently rechecked on the host. Do that before deployment. Keep
-hostnames, keys, account identifiers and private host evidence outside this
-public fork.
+private HTTPS endpoint forwarded to its loopback port. A read-only SSH audit on
+2026-10-27 confirmed the running systemd user service, its original versioned
+executable path, matching on-disk/running executable checksums, Linux x86-64 and
+Python 3.12. Configuration and credential directory permissions were checked;
+the service was active with connections on its loopback listener. No restart or
+deployment was performed. Recheck live activity before deployment. Keep hostnames,
+keys, account identifiers and private host evidence outside this public fork.
 
 ## Replacement assessment
 
