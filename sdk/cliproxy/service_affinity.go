@@ -11,8 +11,10 @@ import (
 
 // startAffinityPersistence runs after credentials load and before admission.
 // The state file uses a non-JSON suffix so credential watchers ignore it.
-func (s *Service) startAffinityPersistence(ctx context.Context, cfg *config.Config) {
-	if s.coreManager == nil || cfg == nil || cfg.Home.Enabled || cfg.AuthDir == "" {
+func (s *Service) startAffinityPersistence(ctx context.Context, cfg *config.Config, loadErr error) {
+	// An incomplete credential set cannot distinguish a removed account from a
+	// temporarily unavailable store. Preserve the previous checkpoint untouched.
+	if loadErr != nil || s.coreManager == nil || cfg == nil || cfg.Home.Enabled || cfg.AuthDir == "" {
 		return
 	}
 	s.affinityMu.Lock()

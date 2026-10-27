@@ -3,8 +3,8 @@
 ## Scope and baseline
 
 This fork adds a place to maintain subscription-aware routing without changing
-client endpoints or enrolling existing accounts again. No routing changes or
-deployment have been performed. The first implementation adds release packaging
+client endpoints or enrolling existing accounts again. No live routing change or
+deployment has been performed. The first implementation adds release packaging
 and a host-local release tool. The follow-up adds
 [durable local affinity](FORK_AFFINITY.md); automatic request draining remains
 separate work. The host observations below still describe upstream 8.0.29.
@@ -111,8 +111,10 @@ currently serving process to initiate an update.
   `previous` is recorded before switching so a recovery target remains.
 
 Stage operations can run while the proxy is busy. Activation requires a real
-maintenance window until admission control and draining exist. It does not
-preserve in-memory affinities. No live deployment has been verified yet.
+maintenance window until admission control and draining exist. The release tool
+cannot export the upstream process's in-memory bindings; affinity-aware builds
+restore their own checkpoints on later restarts. No live deployment has been
+verified yet.
 
 For the first adoption, run on the audited Linux host, substituting verified
 values for the uppercase placeholders:

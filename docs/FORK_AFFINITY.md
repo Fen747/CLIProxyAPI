@@ -21,6 +21,9 @@ metadata: the file is atomically replaced from a 0600 temporary file, with a
 and malformed files. Invalid state warns and starts cold rather than blocking
 the proxy. Expired bindings and missing/disabled credentials are discarded;
 temporary quota cooldowns do not discard otherwise valid associations.
+If the credential store cannot load at startup, restore and checkpointing stay
+disabled for that process, preserving the last good file until a successful
+restart can identify which credentials still exist.
 
 Import keeps eviction order and capacity bounds, rebuilds prefix/tail indexes and
 access generations, and never refreshes expiration. Routing/TTL/rebind changes
