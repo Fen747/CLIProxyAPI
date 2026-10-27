@@ -82,3 +82,39 @@ func TestWindowPrimingRespectsNewerPassiveActiveWindow(t *testing.T) {
 		t.Fatal("newer active window ignored")
 	}
 }
+
+type primingIdentityExecutor struct {
+	retryRoundCallExecutor
+	prepares int
+}
+
+func (e *primingIdentityExecutor) ShouldPrepareRequestAuth(a *Auth) bool {
+	return authMetadataString(a, "account_uuid") == ""
+}
+func (e *primingIdentityExecutor) PrepareRequestAuth(_ context.Context, a *Auth) (*Auth, error) {
+	e.prepares++
+	a = a.Clone()
+	a.Metadata["account_uuid"] = "prepared-subscription"
+	return a, nil
+}
+
+func TestPrimeClaudeWindowUsesSerializedIdentityPreparation(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	executor := &primingIdentityExecutor{retryRoundCallExecutor: retryRoundCallExecutor{identifier: "claude"}}
+	manager.RegisterExecutor(executor)
+	_, err := manager.Register(WithSkipPersist(context.Background()), quotaTestAuth("imported"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := manager.GetByID("imported")
+	prepared, err := manager.PrepareClaudeWindowPrimingAuth(context.Background(), a)
+	if err != nil || authMetadataString(prepared, "account_uuid") != "prepared-subscription" || executor.prepares != 1 {
+		t.Fatalf("missing imported identity: %v/%v", prepared, err)
+	}
+	if err := manager.PrimeClaudeWindow(context.Background(), prepared); err == nil {
+		t.Fatal("expected test executor failure")
+	}
+	if ids := executor.ids("execute"); fmt.Sprint(ids) != "[imported]" || executor.prepares != 1 {
+		t.Fatalf("preparation/retry mismatch: %v/%d", ids, executor.prepares)
+	}
+}

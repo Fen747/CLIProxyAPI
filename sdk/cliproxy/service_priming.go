@@ -19,6 +19,7 @@ type windowPrimingJob struct {
 	proxy     string
 	cancel    context.CancelFunc
 	cancelled bool
+	done      func()
 }
 type windowPrimingResult struct {
 	job      *windowPrimingJob
@@ -102,14 +103,22 @@ func samePrimingCredential(a, b *coreauth.Auth) bool {
 	return coreauth.ClaudeQuotaEligible(a) && a.ID == b.ID && a.RegistrationEpoch == b.RegistrationEpoch && a.CredentialVersion == b.CredentialVersion && a.ProxyURL == b.ProxyURL
 }
 
+type primingOutcome int
+
+const (
+	primingSkipped primingOutcome = iota
+	primingStarted
+	primingDeferred
+)
+
 // observe runs only after a fresh successful usage read, never from a quota guess.
-func (p *quotaPrimer) observe(ctx context.Context, cfg *config.Config, policy *coreauth.InitialQuotaPolicy, a *coreauth.Auth, now time.Time) bool {
+func (p *quotaPrimer) observe(ctx context.Context, cfg *config.Config, policy *coreauth.InitialQuotaPolicy, a *coreauth.Auth, now time.Time) primingOutcome {
 	if !primingEnabled(cfg) || p.state == nil || p.failed || policy == nil {
-		return false
+		return primingSkipped
 	}
 	current, ok := p.manager.GetByID(a.ID)
 	if !ok || !samePrimingCredential(current, a) {
-		return false
+		return primingSkipped
 	}
 	a = current
 	canPrime, reset := policy.WindowPrimingDecision(a, now)
@@ -119,14 +128,17 @@ func (p *quotaPrimer) observe(ctx context.Context, cfg *config.Config, policy *c
 			p.failed = true
 			log.Warn("Claude priming confirmation could not be persisted")
 		}
-		return false
+		return primingSkipped
 	}
-	if !canPrime || p.active != nil {
-		return false
+	if !canPrime {
+		return primingSkipped
+	}
+	if p.active != nil {
+		return primingDeferred
 	}
 	done, err := p.begin()
 	if err != nil {
-		return false
+		return primingDeferred
 	}
 	reserved, err := p.state.Reserve(key, now)
 	if err != nil || !reserved {
@@ -135,15 +147,14 @@ func (p *quotaPrimer) observe(ctx context.Context, cfg *config.Config, policy *c
 			p.failed = true
 			log.Warn("Claude priming attempt could not be persisted")
 		}
-		return false
+		return primingSkipped
 	}
 	requestCtx, cancel := context.WithCancel(ctx)
-	job := &windowPrimingJob{auth: current, policy: policy, proxy: cfg.ProxyURL, cancel: cancel}
+	job := &windowPrimingJob{auth: current, policy: policy, proxy: cfg.ProxyURL, cancel: cancel, done: done}
 	p.active = job
 	p.workers.Add(1)
 	go func() {
 		defer p.workers.Done()
-		defer done()
 		errRun := p.run(requestCtx, current)
 		observed := p.now()
 		// Even a failed response may have consumed quota; confirm before any later attempt.
@@ -157,7 +168,7 @@ func (p *quotaPrimer) observe(ctx context.Context, cfg *config.Config, policy *c
 		case <-ctx.Done():
 		}
 	}()
-	return true
+	return primingStarted
 }
 
 func (p *quotaPrimer) complete(result windowPrimingResult, now time.Time) bool {
@@ -166,6 +177,7 @@ func (p *quotaPrimer) complete(result windowPrimingResult, now time.Time) bool {
 		return false
 	}
 	p.active = nil
+	defer job.done()
 	job.cancel()
 	if job.cancelled || p.state == nil || p.failed || len(result.body) == 0 {
 		return false
@@ -190,6 +202,10 @@ func (p *quotaPrimer) stop() {
 		p.active.cancel()
 	}
 	p.workers.Wait()
+	if p.active != nil {
+		p.active.done()
+		p.active = nil
+	}
 	if p.state != nil {
 		if err := p.state.Close(); err != nil {
 			log.Warn("could not close Claude priming state")

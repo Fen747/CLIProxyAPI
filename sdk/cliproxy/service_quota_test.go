@@ -111,3 +111,61 @@ func TestQuotaPollerHourlySuccessFailureAndStaleResult(t *testing.T) {
 	}
 	p.stop()
 }
+
+func TestQuotaPollerRechecksInactiveAccountsAfterPrimingSlotFrees(t *testing.T) {
+	p, cfg, policy, auths := quotaPollTestSetup(t)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.fetch = func(context.Context, *config.Config, *coreauth.Auth) ([]byte, error) {
+		return []byte(`{"five_hour":null,"seven_day":null}`), nil
+	}
+	p.scan(ctx, cfg, policy, auths[:1], now)
+	p.complete(<-p.results, now)
+	account := p.accounts[auths[0].ID]
+	account.primingWaiting = true
+	p.wakePrimingWaiters(now)
+	p.scan(ctx, cfg, policy, auths[:1], now.Add(time.Second))
+	if len(p.active) != 1 {
+		t.Fatal("deferred inactive account still waits for hourly poll")
+	}
+	p.complete(<-p.results, now.Add(time.Second))
+	p.stop()
+}
+
+func TestQuotaPollerPreparesIdentityBeforeUsageAndDoesNotFetchOnFailure(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			p, cfg, policy, auths := quotaPollTestSetup(t)
+			now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+			p.prepare = func(_ context.Context, _ *config.Config, a *coreauth.Auth) (*coreauth.Auth, error) {
+				if fail {
+					return nil, errors.New("identity unavailable")
+				}
+				a = a.Clone()
+				a.Metadata["account_uuid"] = "prepared"
+				return a, nil
+			}
+			fetched := make(chan bool, 1)
+			p.fetch = func(_ context.Context, _ *config.Config, a *coreauth.Auth) ([]byte, error) {
+				fetched <- a.Metadata["account_uuid"] == "prepared"
+				return []byte(`{"five_hour":null,"seven_day":null}`), nil
+			}
+			p.scan(context.Background(), cfg, policy, auths[:1], now)
+			result := <-p.results
+			if p.complete(result, now) == fail {
+				t.Fatal("preparation result ignored")
+			}
+			p.stop()
+			if fail {
+				select {
+				case <-fetched:
+					t.Fatal("usage fetched after preparation error")
+				default:
+				}
+			} else if !<-fetched {
+				t.Fatal("usage fetched without prepared identity")
+			}
+		})
+	}
+}

@@ -53,7 +53,7 @@ func TestQuotaPrimerPersistsBeforeInferenceAndConfirmsReset(t *testing.T) {
 		persisted <- err == nil && strings.Contains(string(data), primingSubscriptionKey(a)) && !strings.Contains(string(data), "private-token")
 		return nil
 	}
-	if !p.observe(context.Background(), cfg, policy, auths[0], now) {
+	if p.observe(context.Background(), cfg, policy, auths[0], now) != primingStarted {
 		t.Fatal("inactive window did not start")
 	}
 	if !<-persisted {
@@ -75,7 +75,7 @@ func TestQuotaPrimerPersistsBeforeInferenceAndConfirmsReset(t *testing.T) {
 func TestQuotaPrimerRejectsDrainAndKeepsAdmittedWorkCounted(t *testing.T) {
 	p, cfg, policy, auths, gate, now := primingTestSetup(t)
 	_, _ = gate.Drain("owner")
-	if p.observe(context.Background(), cfg, policy, auths[0], now) {
+	if p.observe(context.Background(), cfg, policy, auths[0], now) == primingStarted {
 		t.Fatal("primed during maintenance")
 	}
 	if _, err := os.Stat(p.path); !os.IsNotExist(err) {
@@ -84,7 +84,7 @@ func TestQuotaPrimerRejectsDrainAndKeepsAdmittedWorkCounted(t *testing.T) {
 	_, _ = gate.Resume("owner")
 	started, release := make(chan struct{}), make(chan struct{})
 	p.run = func(context.Context, *coreauth.Auth) error { close(started); <-release; return nil }
-	if !p.observe(context.Background(), cfg, policy, auths[0], now) {
+	if p.observe(context.Background(), cfg, policy, auths[0], now) != primingStarted {
 		t.Fatal("not admitted")
 	}
 	<-started
@@ -95,6 +95,9 @@ func TestQuotaPrimerRejectsDrainAndKeepsAdmittedWorkCounted(t *testing.T) {
 	close(release)
 	result := <-p.results
 	p.workers.Wait()
+	if gate.State().Ready {
+		t.Fatal("admission released before confirmation cleanup")
+	}
 	p.complete(result, now)
 	if !gate.State().Ready {
 		t.Fatal("drain did not complete")
@@ -105,7 +108,7 @@ func TestQuotaPrimerDisableCancelsAndRestartKeepsAttempt(t *testing.T) {
 	p, cfg, policy, auths, gate, now := primingTestSetup(t)
 	started := make(chan struct{})
 	p.run = func(ctx context.Context, _ *coreauth.Auth) error { close(started); <-ctx.Done(); return ctx.Err() }
-	if !p.observe(context.Background(), cfg, policy, auths[0], now) {
+	if p.observe(context.Background(), cfg, policy, auths[0], now) != primingStarted {
 		t.Fatal("not admitted")
 	}
 	<-started
@@ -134,19 +137,40 @@ func TestQuotaPrimerDeduplicatesSubscriptionAndRejectsMissingState(t *testing.T)
 	p.fetch = func(context.Context, *config.Config, *coreauth.Auth) ([]byte, error) {
 		return nil, fmt.Errorf("unknown result")
 	}
-	if !p.observe(context.Background(), cfg, policy, auths[0], now) {
+	if p.observe(context.Background(), cfg, policy, auths[0], now) != primingStarted {
 		t.Fatal("not admitted")
 	}
 	result := <-p.results
 	p.workers.Wait()
 	p.complete(result, now)
-	if p.observe(context.Background(), cfg, policy, auths[1], now) {
+	if p.observe(context.Background(), cfg, policy, auths[1], now) == primingStarted {
 		t.Fatal("duplicate subscription primed twice")
 	}
 	p.state.Close()
 	p.state = nil
 	p.failed = true
-	if p.observe(context.Background(), cfg, policy, auths[1], now.Add(5*time.Minute)) {
+	if p.observe(context.Background(), cfg, policy, auths[1], now.Add(5*time.Minute)) == primingStarted {
 		t.Fatal("primed without durable state")
 	}
+}
+
+func TestQuotaPollerRechecksAfterMaintenanceWithoutWaitingAnHour(t *testing.T) {
+	primer, cfg, policy, auths, gate, now := primingTestSetup(t)
+	poller := newQuotaPoller()
+	poller.fetch = func(context.Context, *config.Config, *coreauth.Auth) ([]byte, error) {
+		return []byte(`{"five_hour":null,"seven_day":null}`), nil
+	}
+	_, _ = gate.Drain("owner")
+	poller.scan(context.Background(), cfg, policy, auths[:1], now)
+	poller.completeUsage(context.Background(), primer, cfg, <-poller.results, now)
+	if next := poller.accounts[auths[0].ID].next; !next.Equal(now.Add(5 * time.Minute)) {
+		t.Fatalf("maintenance deferred until %v, want five-minute retry", next)
+	}
+	_, _ = gate.Resume("owner")
+	poller.scan(context.Background(), cfg, policy, auths[:1], now.Add(5*time.Minute))
+	if len(poller.active) != 1 {
+		t.Fatal("maintenance resume waits for hourly read")
+	}
+	poller.complete(<-poller.results, now.Add(5*time.Minute))
+	poller.stop()
 }

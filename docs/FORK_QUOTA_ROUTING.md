@@ -107,6 +107,9 @@ below 98%. Zero utilization with an active reset, missing data, expired windows 
 unavailable state do not authorize inference. Normal monitoring is hourly, with the
 same additional reset checks described above.
 
+Before reserving an attempt, the usage worker uses normal serialized OAuth identity
+preparation (which may persist missing account/device metadata), then reads usage
+for that exact credential version. Preparation errors consume no inference attempt.
 The service invokes the registered Claude executor once with
 `claude-haiku-4-5-20251001`, `max_tokens: 1`, and “Reply with a dot.” It bypasses
 manager selection, affinity and retry/failover loops; the exact credential epoch
@@ -121,7 +124,9 @@ and waits for admitted jobs. Shutdown, disable, Home mode, credential/proxy chan
 cancel jobs; configuration is reconciled within 15 seconds. Changing `auth-dir`
 requires restart. No post-connect timeout is introduced. The result is considered
 confirmed only when a fresh usage response contains a future five-hour reset.
-An unconfirmed/failed result schedules another usage check after five minutes.
+An unconfirmed/failed result or maintenance refusal schedules another usage check
+after five minutes. Accounts waiting for the single priming slot are rechecked
+as soon as it frees, rather than waiting for their next hourly read.
 
 Before inference, a private write-ahead reservation is atomically persisted in
 `AUTH_DIR/.claude-window-priming.state`. SHA-256 subscription keys use the account

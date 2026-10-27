@@ -18,9 +18,9 @@ func (m *Manager) PrimeClaudeWindow(ctx context.Context, expected *Auth) error {
 	if expected == nil {
 		return errors.New("Claude priming credential is nil")
 	}
-	current, ok := m.GetByID(expected.ID)
-	if !ok || quotaIdentityOf(current) != quotaIdentityOf(expected) || !ClaudeQuotaEligible(current) {
-		return errors.New("Claude priming credential changed")
+	current, err := m.PrepareClaudeWindowPrimingAuth(ctx, expected)
+	if err != nil {
+		return err
 	}
 	if _, err := getSelectorAvailableAuths(ctx, []*Auth{current}, "claude", ClaudeWindowPrimingModel, time.Now()); err != nil {
 		return err
@@ -36,6 +36,32 @@ func (m *Manager) PrimeClaudeWindow(ctx context.Context, expected *Auth) error {
 	body := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"Reply with a dot."}]}`)
 	req := cliproxyexecutor.Request{Model: ClaudeWindowPrimingModel, Payload: body, Format: sdktranslator.FormatClaude}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: body, Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: current.ID}}
-	_, err := executor.Execute(ctx, current, req, opts)
+	_, err = executor.Execute(ctx, current, req, opts)
 	return err
+}
+
+// PrepareClaudeWindowPrimingAuth uses normal serialized OAuth identity preparation.
+// The observer invokes it before reading usage, deriving a subscription key or
+// reserving an attempt, so imported credentials do not consume attempts on setup.
+func (m *Manager) PrepareClaudeWindowPrimingAuth(ctx context.Context, expected *Auth) (*Auth, error) {
+	if expected == nil || m.HomeEnabled() {
+		return nil, errors.New("Claude priming auth unavailable")
+	}
+	current, ok := m.GetByID(expected.ID)
+	if !ok || quotaIdentityOf(current) != quotaIdentityOf(expected) || !ClaudeQuotaEligible(current) {
+		return nil, errors.New("Claude priming credential changed")
+	}
+	executor := m.executorFor("claude")
+	if executor == nil {
+		return nil, errors.New("Claude executor unavailable")
+	}
+	prepared, err := m.prepareRequestAuth(ctx, executor, current)
+	if err != nil {
+		return nil, err
+	}
+	latest, ok := m.GetByID(expected.ID)
+	if !ok || prepared == nil || quotaIdentityOf(latest) != quotaIdentityOf(expected) || quotaIdentityOf(prepared) != quotaIdentityOf(expected) || !ClaudeQuotaEligible(latest) {
+		return nil, errors.New("Claude priming credential changed during preparation")
+	}
+	return latest, nil
 }
