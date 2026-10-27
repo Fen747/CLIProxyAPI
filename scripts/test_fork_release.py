@@ -78,6 +78,14 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(result["apply"])
         self.assertFalse(self.manager.root.exists())
 
+    def test_adoption_rejects_abbreviated_provenance_before_writing_state(self):
+        binary = self.directory / "existing-binary"
+        binary.write_bytes(executable("original"))
+        with self.assertRaisesRegex(ValueError, "Invalid commit"):
+            self.manager.adopt(binary, hashlib.sha256(binary.read_bytes()).hexdigest(),
+                               "8.0.29", "b" * 7, apply=True)
+        self.assertFalse(self.manager.root.exists())
+
     def test_bad_archive_checksum_preserves_current_release(self):
         original = self.adopted()
         archive, _, _ = self.archive()

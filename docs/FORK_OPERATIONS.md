@@ -33,7 +33,7 @@ keys, account identifiers and private host evidence outside this public fork.
 
 The release tool's read-only adoption plan verified the installed binary without
 creating its release root. Its systemd guard rejected the active live service.
-All 18 release-operation tests also passed in an isolated temporary WSL directory;
+All 19 release-operation tests also passed in an isolated temporary WSL directory;
 these tests simulate activation and rollback, rather than restarting the live service.
 
 ## Replacement assessment
@@ -90,7 +90,8 @@ currently serving process to initiate an update.
 * `adopt` verifies and copies the existing Linux executable into an immutable
   baseline release and creates `current`. This does not change the process
   already running from its original path. Supply the verified binary checksum,
-  observed version and source commit.
+  observed version and full 40-character source commit. Release manifests require
+  full commit provenance; health responses may abbreviate that known commit.
 * `stage` verifies an explicit archive SHA256, an allowlisted three-file archive,
   its manifest, executable architecture and binary checksum. It installs the
   release, including its license notice, without selecting it. Repeating an

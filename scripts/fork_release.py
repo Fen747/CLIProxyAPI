@@ -44,7 +44,7 @@ def validate_manifest(value):
         raise ValueError("Release identifier and version differ")
     if value.get("platform") != "linux-amd64":
         raise ValueError("Expected a linux-amd64 release")
-    for field, pattern in (("commit", r"[a-f0-9]{7,40}"), ("binary_sha256", r"[a-f0-9]{64}")):
+    for field, pattern in (("commit", r"[a-f0-9]{40}"), ("binary_sha256", r"[a-f0-9]{64}")):
         if not isinstance(value.get(field), str) or not re.fullmatch(pattern, value[field]):
             raise ValueError("Invalid " + field)
     return value
