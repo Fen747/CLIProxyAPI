@@ -26,6 +26,21 @@ type maintenanceStreamExecutor struct {
 	chunks  chan coreexecutor.StreamChunk
 }
 
+type maintenanceLiveExecutor struct {
+	codexSearchCaptureExecutor
+	hangups int
+}
+
+func (e *maintenanceLiveExecutor) HttpRequest(_ context.Context, _ *auth.Auth, request *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(request.URL.Path, "/hangup") {
+		e.hangups++
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"ok"}`))}, nil
+	}
+	return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{
+		"Content-Type": {"application/sdp"}, "Location": {"/v1/realtime/calls/call-maintenance"},
+	}, Body: io.NopCloser(strings.NewReader("v=0\r\n"))}, nil
+}
+
 func (e *maintenanceStreamExecutor) ExecuteStream(ctx context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	e.started <- ctx
 	return &coreexecutor.StreamResult{Chunks: e.chunks}, nil
@@ -67,6 +82,30 @@ func TestMaintenanceControlRequiresAuthAndOwnership(t *testing.T) {
 	}
 	if response := maintenanceCall(t, server, http.MethodPut, "short", "test-management"); response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid token status = %d", response.Code)
+	}
+}
+
+func TestMaintenanceCORSPreflightAndRejectionsRemainReadable(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management")
+	server := newTestServer(t)
+	maintenanceCall(t, server, http.MethodPut, testMaintenanceToken, "test-management")
+	for _, method := range []string{http.MethodOptions, http.MethodDelete} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(method, maintenancePath, nil)
+		request.Header.Set("Origin", "https://management.example")
+		request.Header.Set("Access-Control-Request-Method", http.MethodDelete)
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Header().Get("Access-Control-Allow-Origin") == "" {
+			t.Fatal("maintenance response lacks CORS headers")
+		}
+		if method == http.MethodOptions && recorder.Code != http.StatusNoContent {
+			t.Fatalf("resume preflight = %d", recorder.Code)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/responses", nil))
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Access-Control-Allow-Origin") == "" {
+		t.Fatalf("rejected inference lacks CORS headers: %d", recorder.Code)
 	}
 }
 
@@ -268,5 +307,52 @@ func TestMaintenanceLetsActiveWebsocketTurnFinishAndRejectsNewFrames(t *testing.
 	<-exited
 	if !server.maintenance.State().Ready {
 		t.Fatalf("finished turn = %+v", server.maintenance.State())
+	}
+}
+
+func TestMaintenanceAllowsSidebandAndHangupForAdmittedLiveCall(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management")
+	server := newTestServer(t)
+	defer server.codexLiveHandler.Close()
+	executor := &maintenanceLiveExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	if _, err := server.handlers.AuthManager.Register(context.Background(), &auth.Auth{
+		ID: "maintenance-live-auth", Provider: "codex", Status: auth.StatusActive,
+		Metadata: map[string]any{"access_token": "test-oauth-token"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(method, path, strings.NewReader("v=0\r\n"))
+		request.Header.Set("Authorization", "Bearer test-key")
+		request.Header.Set("Content-Type", "application/sdp")
+		server.engine.ServeHTTP(recorder, request)
+		return recorder
+	}
+	if response := call(http.MethodPost, "/v1/realtime/calls"); response.Code != http.StatusCreated {
+		t.Fatalf("bootstrap = %d: %s", response.Code, response.Body.String())
+	}
+	if server.codexLiveHandler.ActiveSessions() != 1 {
+		t.Fatal("bootstrap did not retain admitted call")
+	}
+	response := maintenanceCall(t, server, http.MethodPut, testMaintenanceToken, "test-management")
+	if !strings.Contains(response.Body.String(), `"ready":false`) {
+		t.Fatalf("retained call was omitted: %s", response.Body.String())
+	}
+	for _, path := range []string{"/v1/live/call-maintenance", "/v1/realtime/calls/call-maintenance", "/v1/realtime?call_id=call-maintenance"} {
+		if response := call(http.MethodGet, path); response.Code != http.StatusUpgradeRequired {
+			t.Fatalf("existing sideband %s = %d: %s", path, response.Code, response.Body.String())
+		}
+	}
+	if response := call(http.MethodPost, "/v1/realtime/calls/call-unknown/hangup"); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unknown call admitted: %d", response.Code)
+	}
+	if response := call(http.MethodPost, "/v1/realtime/calls/call-maintenance/hangup"); response.Code != http.StatusOK {
+		t.Fatalf("existing hangup = %d: %s", response.Code, response.Body.String())
+	}
+	response = maintenanceCall(t, server, http.MethodGet, "", "test-management")
+	if executor.hangups != 1 || !strings.Contains(response.Body.String(), `"ready":true`) {
+		t.Fatalf("hangup did not complete drainage: %s", response.Body.String())
 	}
 }

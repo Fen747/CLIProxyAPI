@@ -21,7 +21,7 @@ func (s *Server) maintenanceMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		done, err := s.maintenance.Begin()
+		done, err := s.maintenance.BeginExisting(func() bool { return s.existingLiveControl(c) })
 		if err != nil {
 			c.Header("Retry-After", "1")
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
@@ -35,10 +35,32 @@ func (s *Server) maintenanceMiddleware() gin.HandlerFunc {
 	}
 }
 
+func (s *Server) existingLiveControl(c *gin.Context) bool {
+	callID := c.Param("call_id")
+	switch c.FullPath() {
+	case "/v1/live/:call_id", "/v1/realtime/calls/:call_id":
+		if c.Request.Method != http.MethodGet {
+			return false
+		}
+	case "/v1/realtime":
+		if c.Request.Method != http.MethodGet {
+			return false
+		}
+		callID = c.Query("call_id")
+	case "/v1/realtime/calls/:call_id/hangup":
+		if c.Request.Method != http.MethodPost {
+			return false
+		}
+	default:
+		return false
+	}
+	return s.codexLiveHandler.HasSession(callID)
+}
+
 func (s *Server) maintenanceControl(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	if c.Request.Method == http.MethodGet {
-		s.maintenanceState(c, s.maintenance.State())
+		s.maintenanceState(c)
 		return
 	}
 	var request struct {
@@ -54,16 +76,15 @@ func (s *Server) maintenanceControl(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "Proxy instance changed; read maintenance state again"})
 		return
 	}
-	var state maintenance.State
 	var err error
 	if c.Request.Method == http.MethodDelete {
-		state, err = s.maintenance.Resume(request.Token)
+		_, err = s.maintenance.Resume(request.Token)
 	} else {
 		if cfg := s.getConfig(); cfg != nil && cfg.Home.Enabled {
 			c.JSON(http.StatusConflict, gin.H{"error": "Home-dispatched work is not covered by local maintenance"})
 			return
 		}
-		state, err = s.maintenance.Drain(request.Token)
+		_, err = s.maintenance.Drain(request.Token)
 	}
 	if err != nil {
 		if errors.Is(err, maintenance.ErrOwner) {
@@ -73,14 +94,11 @@ func (s *Server) maintenanceControl(c *gin.Context) {
 		}
 		return
 	}
-	s.maintenanceState(c, state)
+	s.maintenanceState(c)
 }
 
-func (s *Server) maintenanceState(c *gin.Context, state maintenance.State) {
+func (s *Server) maintenanceState(c *gin.Context) {
 	cfg := s.getConfig()
-	if s.codexLiveHandler != nil {
-		state.Active += s.codexLiveHandler.ActiveSessions()
-		state.Ready = state.Draining && state.Active == 0
-	}
+	state := s.maintenance.StateWithActive(s.codexLiveHandler.ActiveSessions)
 	c.JSON(http.StatusOK, gin.H{"maintenance": state, "pid": os.Getpid(), "supported": state.Durable && (cfg == nil || !cfg.Home.Enabled)})
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage verified releases and switch an already stopped systemd user service."""
+"""Stage verified releases and switch a systemd user service after drainage."""
 
 import argparse
 from contextlib import contextmanager
@@ -44,6 +44,8 @@ def validate_manifest(value):
         raise ValueError("Release identifier and version differ")
     if value.get("platform") != "linux-amd64":
         raise ValueError("Expected a linux-amd64 release")
+    if "maintenance_protocol" in value and (type(value["maintenance_protocol"]) is not int or value["maintenance_protocol"] != 1):
+        raise ValueError("Unsupported maintenance protocol")
     for field, pattern in (("commit", r"[a-f0-9]{40}"), ("binary_sha256", r"[a-f0-9]{64}")):
         if not isinstance(value.get(field), str) or not re.fullmatch(pattern, value[field]):
             raise ValueError("Invalid " + field)
@@ -213,6 +215,8 @@ class Releases:
             previous = self.target("current")
             if previous is None:
                 raise ValueError("Adopt and verify the existing binary before activating a release")
+            if maintenance is None and (self.root / ".maintenance-operation.json").exists():
+                raise ValueError("Recover the saved maintenance operation with resume before switching releases")
             if previous == release:
                 if apply:
                     health(manifest)
@@ -222,6 +226,8 @@ class Releases:
             if maintenance is None:
                 service.require_stopped(executable)
             else:
+                if manifest.get("maintenance_protocol") != 1:
+                    raise ValueError("Target release does not declare durable maintenance support; no drainage started")
                 pid = service.require_running(executable)
                 maintenance.inspect(pid)
             if not apply:
@@ -243,8 +249,6 @@ class Releases:
                 self.link("current", release)
                 service.start()
                 health(manifest)
-                if maintenance is not None:
-                    maintenance.resume()
             except BaseException as error:
                 # Never repoint a release while its candidate process may still be running.
                 if maintenance is not None:
@@ -267,6 +271,8 @@ class Releases:
                 if maintenance is not None:
                     maintenance.resume()
                 raise RuntimeError("Candidate failed; previous release restored and healthy") from error
+            if maintenance is not None:
+                maintenance.resume()
         return {"action": "activate", "from": previous, "release": release, "apply": True, "changed": True}
 
 
@@ -339,7 +345,7 @@ def management_request(base_url, key_file):
     return request
 
 
-def management_health(base_url, key_file, wait=10):
+def management_health(base_url, key_file, wait=10, allow_draining=False):
     request = management_request(base_url, key_file)
 
     def check(manifest):
@@ -350,6 +356,10 @@ def management_health(base_url, key_file, wait=10):
                     version = response.headers.get("X-CPA-VERSION", "")
                     commit = response.headers.get("X-CPA-COMMIT", "")
                     if version == manifest["version"] and len(commit) >= 7 and manifest["commit"].startswith(commit):
+                        if manifest.get("maintenance_protocol") == 1 and not allow_draining:
+                            state = Maintenance(request).state()
+                            if state["maintenance"]["draining"]:
+                                raise RuntimeError("Proxy remains in maintenance; resume admission before reporting healthy")
                         return
             except urllib.error.HTTPError as error:
                 error.close()
@@ -468,7 +478,8 @@ def main(argv=None):
     adopt.add_argument("--version", required=True)
     adopt.add_argument("--commit", required=True)
     for name in ("activate", "rollback", "resume"):
-        operation = subcommands.add_parser(name, help="Requires the service to be drained and stopped")
+        help_text = "Resume a saved drain on the running service" if name == "resume" else "Switch a stopped service, or use --drain for a running maintenance-aware proxy"
+        operation = subcommands.add_parser(name, help=help_text)
         if name == "activate":
             operation.add_argument("--release", required=True)
         operation.add_argument("--service", required=True)
@@ -498,7 +509,7 @@ def main(argv=None):
         release = args.release if args.command == "activate" else None
         maintenance = Maintenance(management_request(args.url, args.management_key_file), args.drain_wait,
                                   releases.root / ".maintenance-operation.json") if args.drain else None
-        result = releases.activate(release, UserService(args.service), management_health(args.url, args.management_key_file), args.apply, maintenance)
+        result = releases.activate(release, UserService(args.service), management_health(args.url, args.management_key_file, allow_draining=args.drain), args.apply, maintenance)
     print(json.dumps(result, sort_keys=True))
 
 

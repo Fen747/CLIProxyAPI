@@ -133,11 +133,13 @@ class ReleaseTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.manager = Releases(self.directory / "managed")
 
-    def archive(self, version="8.0.29-fleet.1", binary=None, extra=None):
+    def archive(self, version="8.0.29-fleet.1", binary=None, extra=None, maintenance=False):
         binary = executable(version) if binary is None else binary
         manifest = {"schema": 1, "release": "fleet-v" + version, "version": version,
                     "commit": "a" * 40, "platform": "linux-amd64",
                     "binary_sha256": hashlib.sha256(binary).hexdigest()}
+        if maintenance:
+            manifest["maintenance_protocol"] = 1
         archive = self.directory / (version + ".tar.gz")
         with tarfile.open(archive, "w:gz") as bundle:
             for name, data in (("manifest.json", json.dumps(manifest).encode()), ("LICENSE", b"Test license notice\n"), ("cli-proxy-api", binary)):
@@ -156,7 +158,7 @@ class ReleaseTests(unittest.TestCase):
         return "upstream-v8.0.29"
 
     def staged(self, version="8.0.29-fleet.1"):
-        archive, checksum, manifest = self.archive(version)
+        archive, checksum, manifest = self.archive(version, maintenance=True)
         self.manager.stage(archive, checksum, apply=True)
         return manifest["release"]
 
@@ -173,6 +175,26 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(service.events, [])
         self.assertFalse(api.draining)
         self.assertFalse(maintenance.state_file.exists())
+
+    def test_drain_rollback_to_unsupported_release_is_refused_before_mutation(self):
+        self.adopted()
+        current = self.staged()
+        self.manager.activate(current, FakeService(), lambda _: None, apply=True)
+        service = FakeService(running=True)
+        api = FakeMaintenanceAPI()
+        with self.assertRaisesRegex(ValueError, "does not declare durable maintenance"):
+            self.manager.activate(None, service, lambda _: None, apply=True, maintenance=Maintenance(api.request))
+        self.assertEqual(self.manager.target("current"), current)
+        self.assertEqual(service.events, [])
+        self.assertEqual(api.methods, [])
+
+    def test_saved_maintenance_cannot_be_bypassed_with_stopped_service_mode(self):
+        original = self.adopted()
+        candidate = self.staged()
+        (self.manager.root / ".maintenance-operation.json").write_text("saved-operation")
+        with self.assertRaisesRegex(ValueError, "saved maintenance"):
+            self.manager.activate(candidate, FakeService(), lambda _: None, apply=True)
+        self.assertEqual(self.manager.target("current"), original)
 
     def test_drain_precedes_stop_and_switch_and_plan_does_not_mutate(self):
         self.adopted()
@@ -255,6 +277,29 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(service.running)
         self.assertFalse(api.draining)
         self.assertFalse(maintenance.state_file.exists())
+
+    def test_resume_failure_after_healthy_candidate_does_not_roll_back(self):
+        self.adopted()
+        candidate = self.staged()
+        service = FakeService(running=True)
+        api = FakeMaintenanceAPI()
+        operation = Maintenance(api.request, wait=0, state_file=self.manager.root / ".maintenance-operation.json")
+
+        def health(manifest):
+            if manifest["release"] == candidate:
+                api.fail_resume = True
+
+        with self.assertRaisesRegex(RuntimeError, "recovery required"):
+            self.manager.activate(candidate, service, health, apply=True, maintenance=operation)
+        self.assertEqual(self.manager.target("current"), candidate)
+        self.assertEqual(service.events, ["stop", "start"])
+        self.assertTrue(operation.state_file.exists())
+        self.assertTrue(api.draining)
+        api.fail_resume = False
+        recovery = Maintenance(api.request, state_file=operation.state_file)
+        recovery.load()
+        recovery.resume()
+        self.assertFalse(api.draining)
 
     def test_plan_verifies_archive_without_creating_root(self):
         archive, checksum, _ = self.archive()
@@ -466,6 +511,23 @@ class ReleaseTests(unittest.TestCase):
             management_health("https://example.com", key)
         with self.assertRaisesRegex(ValueError, "private"):
             management_health("http://127.0.0.1:18317", key)
+
+    def test_health_does_not_report_closed_admission_as_normal_success(self):
+        _, _, manifest = self.archive(maintenance=True)
+        api = FakeMaintenanceAPI()
+        api.draining = True
+
+        def request(path, method="GET", data=None):
+            response = api.request(path, method, data) if path == Maintenance.path else io.BytesIO()
+            response.headers = {"X-CPA-VERSION": manifest["version"], "X-CPA-COMMIT": manifest["commit"]}
+            return response
+
+        with patch("fork_release.management_request", return_value=request):
+            with self.assertRaisesRegex(RuntimeError, "remains in maintenance"):
+                management_health("unused", "unused", wait=0)(manifest)
+            management_health("unused", "unused", wait=0, allow_draining=True)(manifest)
+            api.draining = False
+            management_health("unused", "unused", wait=0)(manifest)
 
     def test_health_authenticates_checks_build_and_refuses_redirects(self):
         _, _, manifest = self.archive()

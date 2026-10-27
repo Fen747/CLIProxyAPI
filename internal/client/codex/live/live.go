@@ -176,6 +176,15 @@ func (h *Handler) ActiveSessions() int {
 	return h.sessions.active
 }
 
+// HasSession identifies controls for a call admitted before maintenance.
+func (h *Handler) HasSession(callID string) bool {
+	if h == nil || h.sessions == nil {
+		return false
+	}
+	_, ok := h.sessions.peek(callID)
+	return ok
+}
+
 // Close releases all active Codex live sessions.
 func (h *Handler) Close() {
 	if h == nil {

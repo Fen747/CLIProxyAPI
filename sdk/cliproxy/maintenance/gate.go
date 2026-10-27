@@ -99,16 +99,37 @@ func (g *Gate) state() State {
 }
 
 func (g *Gate) State() State {
+	return g.StateWithActive(nil)
+}
+
+// StateWithActive includes detached work under the same lock as admission of
+// controls for that work. Callbacks must not call back into this gate.
+func (g *Gate) StateWithActive(count func() int) State {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.state()
+	state := g.state()
+	if count != nil {
+		state.Active += count()
+		state.Ready = state.Draining && state.Active == 0
+	}
+	return state
 }
 
 // Begin returns an idempotent release, or refuses work after admission closes.
 func (g *Gate) Begin() (func(), error) {
+	return g.begin(nil)
+}
+
+// BeginExisting also admits controls for already-admitted work during a drain.
+// The existence check and ticket acquisition are atomic with StateWithActive.
+func (g *Gate) BeginExisting(exists func() bool) (func(), error) {
+	return g.begin(exists)
+}
+
+func (g *Gate) begin(exists func() bool) (func(), error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.owner != "" {
+	if g.owner != "" && (exists == nil || !exists()) {
 		return nil, ErrDraining
 	}
 	g.active++

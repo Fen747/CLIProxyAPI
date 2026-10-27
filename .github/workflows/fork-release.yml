@@ -55,7 +55,7 @@ jobs:
           from pathlib import Path
           binary = Path('dist/bundle/cli-proxy-api')
           manifest = {'schema': 1, 'release': 'fleet-v' + os.environ['VERSION'],
-                      'version': os.environ['VERSION'], 'commit': os.environ['GITHUB_SHA'],
+                      'version': os.environ['VERSION'], 'commit': os.environ['GITHUB_SHA'], 'maintenance_protocol': 1,
                       'platform': 'linux-amd64', 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
           Path('dist/bundle/manifest.json').write_text(json.dumps(manifest, sort_keys=True) + '\n')
           PY

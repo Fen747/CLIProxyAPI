@@ -5,8 +5,44 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
+
+func TestExistingControlAndDetachedWorkCannotRaceReadyState(t *testing.T) {
+	g := New()
+	_, _ = g.Drain("owner")
+	var detached atomic.Int32
+	detached.Store(1)
+	checked, proceed := make(chan struct{}), make(chan struct{})
+	ticket := make(chan func(), 1)
+	go func() {
+		done, err := g.BeginExisting(func() bool {
+			exists := detached.Load() > 0
+			close(checked)
+			<-proceed
+			return exists
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		ticket <- done
+	}()
+	<-checked
+	detached.Store(0)
+	snapshot := make(chan State, 1)
+	go func() { snapshot <- g.StateWithActive(func() int { return int(detached.Load()) }) }()
+	close(proceed)
+	done := <-ticket
+	state := <-snapshot
+	if state.Ready || state.Active != 1 {
+		t.Fatalf("ready raced admitted control: %+v", state)
+	}
+	done()
+	if !g.StateWithActive(func() int { return int(detached.Load()) }).Ready {
+		t.Fatal("completed control still blocks maintenance")
+	}
+}
 
 func TestPersistentDrainSurvivesRestartUntilSameOwnerResumes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".maintenance.state")

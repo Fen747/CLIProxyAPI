@@ -47,6 +47,9 @@ directory requires a restart. Upstream binaries do not understand this marker.
   calls also count while retained after their HTTP bootstrap. These conservative
   counts can cause a bounded maintenance attempt to abort rather than cutting
   an active connection.
+  Sideband connections and hangup for an already-stored call remain admitted
+  and counted, with their normal authentication and ownership checks, so clients
+  can finish those calls during maintenance.
 * The websocket relay's provider connections remain open while admitted HTTP
   work uses them; provider registration alone is not an inference request.
 
@@ -98,7 +101,15 @@ recovery instead of forcibly stopping it. The server marker remains closed
 across the next start; the release tool resumes its saved owner only after
 checking health, including after rollback. Both releases must support durable
 maintenance; an older upstream binary ignores the marker and cannot participate
-in this automatic handover.
+in this automatic handover. The target manifest must declare
+`maintenance_protocol: 1`; unsupported targets are refused before admission
+changes, including an automatic rollback to a pre-maintenance release. Recover
+any saved operation before using stopped-service activation. A normal health
+check of a maintenance-aware release also verifies admission is open; only an
+explicit `--drain` transaction allows closed admission during its health checks.
+If admission cannot be resumed after the candidate passed health checks, it
+stays selected and the private recovery record remains; use `resume` without
+rolling back a healthy binary.
 
 The currently live upstream build has no maintenance endpoint. The first
 transition still needs an externally enforced idle window and an already
