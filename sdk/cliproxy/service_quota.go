@@ -28,11 +28,12 @@ type quotaPollResult struct {
 }
 
 type quotaPoller struct {
-	accounts map[string]*quotaPollAccount
-	active   map[*quotaPollAccount]bool
-	results  chan quotaPollResult
-	workers  sync.WaitGroup
-	fetch    func(context.Context, *config.Config, *coreauth.Auth) ([]byte, error)
+	pausedAuthID string
+	accounts     map[string]*quotaPollAccount
+	active       map[*quotaPollAccount]bool
+	results      chan quotaPollResult
+	workers      sync.WaitGroup
+	fetch        func(context.Context, *config.Config, *coreauth.Auth) ([]byte, error)
 }
 
 func newQuotaPoller() *quotaPoller {
@@ -82,7 +83,7 @@ func (p *quotaPoller) scan(ctx context.Context, cfg *config.Config, policy *core
 				break
 			}
 		}
-		if alreadyReading || state.cancel != nil || now.Before(state.next) || len(p.active) >= quotaPollConcurrency {
+		if a.ID == p.pausedAuthID || alreadyReading || state.cancel != nil || now.Before(state.next) || len(p.active) >= quotaPollConcurrency {
 			continue
 		}
 		requestCtx, cancel := context.WithCancel(ctx)
@@ -101,13 +102,13 @@ func (p *quotaPoller) scan(ctx context.Context, cfg *config.Config, policy *core
 	}
 }
 
-func (p *quotaPoller) complete(result quotaPollResult, now time.Time) {
+func (p *quotaPoller) complete(result quotaPollResult, now time.Time) bool {
 	state := result.account
 	delete(p.active, state)
 	state.cancel()
 	state.cancel = nil
 	if p.accounts[state.auth.ID] != state {
-		return
+		return false
 	} // Removed/replaced credentials cannot publish.
 	err := result.err
 	if err == nil {
@@ -118,6 +119,7 @@ func (p *quotaPoller) complete(result quotaPollResult, now time.Time) {
 		// Do not log response bodies, token-bearing errors or credential metadata.
 		log.WithField("auth_id", state.auth.ID).Debug("Claude quota read unavailable; retaining fallback routing")
 	}
+	return err == nil
 }
 
 func (p *quotaPoller) stop() {
@@ -127,7 +129,7 @@ func (p *quotaPoller) stop() {
 	p.workers.Wait()
 }
 
-// startQuotaObserver performs only fixed-endpoint control-plane GETs. It starts
+// startQuotaObserver reads usage and optionally primes explicitly inactive windows. It starts
 // even when disabled so config hot reloads can enable it without a restart.
 func (s *Service) startQuotaObserver(ctx context.Context) {
 	if s.coreManager == nil {
@@ -145,10 +147,21 @@ func (s *Service) startQuotaObserver(ctx context.Context) {
 		defer close(done)
 		poller := newQuotaPoller()
 		defer poller.stop()
+		primer := newQuotaPrimer(s.coreManager, s.server.BeginBackgroundWork, poller.fetch)
+		if cfg := s.currentConfig(); cfg != nil {
+			primer.authDir = cfg.AuthDir
+		}
+		defer primer.stop()
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		scan := func() {
-			poller.scan(ctx, s.currentConfig(), s.coreManager.InitialQuotaPolicy(), s.coreManager.List(), time.Now())
+			cfg, auths := s.currentConfig(), s.coreManager.List()
+			primer.reconcile(cfg, auths)
+			poller.pausedAuthID = ""
+			if primer.active != nil {
+				poller.pausedAuthID = primer.active.auth.ID
+			}
+			poller.scan(ctx, cfg, s.coreManager.InitialQuotaPolicy(), auths, time.Now())
 		}
 		scan()
 		for {
@@ -160,7 +173,21 @@ func (s *Service) startQuotaObserver(ctx context.Context) {
 			case result := <-poller.results:
 				// Reconcile config and credential replacements before accepting a result.
 				scan()
-				poller.complete(result, time.Now())
+				now := time.Now()
+				if poller.complete(result, now) {
+					primer.observe(ctx, s.currentConfig(), result.account.policy, result.account.auth, now)
+				}
+			case result := <-primer.results:
+				scan()
+				now := time.Now()
+				confirmed := primer.complete(result, now)
+				if account := poller.accounts[result.job.auth.ID]; account != nil && samePrimingCredential(account.auth, result.job.auth) {
+					if confirmed {
+						account.next = account.policy.NextPoll(account.auth, now, true)
+					} else {
+						account.next = now.Add(5 * time.Minute)
+					}
+				}
 			}
 		}
 	}()

@@ -163,6 +163,9 @@ routing:
   # Rank first Claude OAuth bindings by quota/reset; requires session-affinity.
   # Reads usage at startup, hourly and near resets; never sends inference to prime windows.
   quota-aware-initial: false # default: false
+  # Optional pinned Haiku message to start a proven inactive 5h window. Consumes quota.
+  # Requires quota-aware-initial, private local state, and no Home mode.
+  claude-window-priming: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind

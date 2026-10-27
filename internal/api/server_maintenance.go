@@ -102,3 +102,12 @@ func (s *Server) maintenanceState(c *gin.Context) {
 	state := s.maintenance.StateWithActive(s.codexLiveHandler.ActiveSessions)
 	c.JSON(http.StatusOK, gin.H{"maintenance": state, "pid": os.Getpid(), "supported": state.Durable && (cfg == nil || !cfg.Home.Enabled)})
 }
+
+// BeginBackgroundWork admits service-owned inference into the same drain gate as HTTP.
+// The caller releases only after upstream work and cleanup have finished.
+func (s *Server) BeginBackgroundWork() (func(), error) {
+	if s == nil || s.maintenance == nil || s.maintenanceErr != nil {
+		return nil, maintenance.ErrDraining
+	}
+	return s.maintenance.Begin()
+}
