@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'Fen747/CLIProxyAPI' && github.ref == 'refs/heads/fleet'
+    if: github.repository == 'iwillcodeit/CLIProxyAPI' && github.ref == 'refs/heads/fleet'
     runs-on: ubuntu-latest
     permissions:
       contents: write
