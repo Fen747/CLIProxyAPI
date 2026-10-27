@@ -71,6 +71,7 @@ type storedSession struct {
 
 type sessionStore struct {
 	mu       sync.Mutex
+	active   int
 	next     uint64
 	lifetime time.Duration
 	sessions map[string]*storedSession
@@ -110,6 +111,7 @@ func (s *sessionStore) put(callID string, session liveSession) liveSession {
 		s.expire(callID, session.token)
 	})
 	s.sessions[callID] = entry
+	s.active++
 	s.mu.Unlock()
 
 	if previous != nil {
@@ -127,6 +129,7 @@ func (s *sessionStore) put(callID string, session liveSession) liveSession {
 		if previous.session.homeSelection != session.homeSelection {
 			endHomeSelection(previous.session, "session_replaced")
 		}
+		s.releaseActive()
 	}
 	return session
 }
@@ -186,6 +189,7 @@ func (s *sessionStore) complete(session liveSession, reason string) {
 	}
 	s.mu.Unlock()
 	endLiveSession(entry.session, reason)
+	s.releaseActive()
 }
 
 func (s *sessionStore) closeAll(reason string) {
@@ -204,6 +208,7 @@ func (s *sessionStore) closeAll(reason string) {
 	s.mu.Unlock()
 	for _, entry := range entries {
 		endLiveSession(entry.session, reason)
+		s.releaseActive()
 	}
 }
 
@@ -224,6 +229,13 @@ func (s *sessionStore) expire(callID string, token uint64) {
 	delete(s.sessions, callID)
 	s.mu.Unlock()
 	endLiveSession(entry.session, "session_expired")
+	s.releaseActive()
+}
+
+func (s *sessionStore) releaseActive() {
+	s.mu.Lock()
+	s.active--
+	s.mu.Unlock()
 }
 
 func (s *sessionStore) peek(callID string) (liveSession, bool) {

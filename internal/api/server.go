@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/maintenance"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -42,7 +44,9 @@ type Server struct {
 	engine *gin.Engine
 
 	// server is the underlying HTTP server.
-	server *http.Server
+	server         *http.Server
+	maintenance    *maintenance.Gate
+	maintenanceErr error
 
 	// muxBaseListener is the shared TCP listener used to serve both HTTP and Redis protocol traffic.
 	listenerMu      sync.Mutex
@@ -157,6 +161,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Create server instance
 	s := &Server{
 		engine:                       engine,
+		maintenance:                  maintenance.New(),
 		handlers:                     handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager),
 		cfg:                          cfg,
 		accessManager:                accessManager,
@@ -169,6 +174,17 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	// Add middleware
+	if !cfg.Home.Enabled && cfg.AuthDir != "" {
+		gate, err := maintenance.Open(filepath.Join(cfg.AuthDir, ".maintenance.state"))
+		if err != nil {
+			s.maintenanceErr = err
+			_, _ = s.maintenance.Drain("unavailable")
+		} else {
+			s.maintenance = gate
+		}
+	}
+	engine.Use(corsMiddleware())
+	engine.Use(s.maintenanceMiddleware())
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
 	engine.Use(logging.CPATraceIDMiddleware())
@@ -195,7 +211,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.requestLogger = requestLogger
 	s.loggerToggle = toggle
 
-	engine.Use(corsMiddleware())
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)
@@ -294,6 +309,9 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) Start() error {
 	if s == nil || s.server == nil {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
+	}
+	if s.maintenanceErr != nil {
+		return fmt.Errorf("failed to load private maintenance marker: %w", s.maintenanceErr)
 	}
 
 	addr := s.server.Addr

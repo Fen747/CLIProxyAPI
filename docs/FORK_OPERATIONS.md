@@ -6,8 +6,9 @@ This fork adds a place to maintain subscription-aware routing without changing
 client endpoints or enrolling existing accounts again. No live routing change or
 deployment has been performed. The first implementation adds release packaging
 and a host-local release tool. The follow-up adds
-[durable local affinity](FORK_AFFINITY.md); automatic request draining remains
-separate work. The host observations below still describe upstream 8.0.29.
+[durable local affinity](FORK_AFFINITY.md) and
+[explicit maintenance/draining](FORK_MAINTENANCE.md). The host observations below
+still describe upstream 8.0.29.
 
 The `fleet` branch starts at upstream `v8.0.29`, commit
 `5fc580b1d72d87a7bcfe5cfb6f479c1aea5625b3`, matching the inspected running
@@ -47,11 +48,12 @@ established from the configuration and code, not from a completed host trial.
 
 Two limitations prevent a promise of transparent replacement:
 
-* `internal/api/server.go`, `Server.Stop`, closes the HTTP server immediately.
+* Upstream `internal/api/server.go`, `Server.Stop`, closes the HTTP server immediately.
   Restarting it can terminate active streams and WebSockets. A systemd stop
-  timeout does not add graceful draining to that implementation.
+  timeout does not add graceful draining to that implementation. The fork adds
+  explicit admission/draining before stopping; normal shutdown stays immediate.
 * `sdk/cliproxy/auth/session_cache.go` keeps affinity bindings in memory. A new
-  process loses them. Upstream prompt caches are not deleted by a proxy restart,
+  upstream process loses them. Upstream prompt caches are not deleted by a proxy restart,
   but choosing a different account afterwards can prevent their reuse.
 
 The first transition from the current process cannot import its bindings unless
@@ -85,8 +87,9 @@ is disabled in this fork; the dedicated `fork-release` workflow is described bel
 
 `scripts/fork_release.py` uses Python 3.10+ and the standard library. Every command
 defaults to a read-only plan; `--apply` performs the operation. It never rewrites
-configuration, keys or OAuth files, installs a service override, or stops the
-currently serving process to initiate an update.
+configuration, keys or OAuth files, or installs a service override. It stops a
+running service only with explicit `--drain --apply` and authenticated evidence
+that admission is closed and active work has finished.
 
 * `adopt` verifies and copies the existing Linux executable into an immutable
   baseline release and creates `current`. This does not change the process
@@ -105,13 +108,16 @@ currently serving process to initiate an update.
   authenticated loopback health check must report the expected version and
   commit; a failed candidate is stopped and the previous binary restarted and
   checked. If the candidate cannot be stopped, its link stays in place and the
-  command fails for operator recovery.
+  command fails for operator recovery. On maintenance-aware fork releases,
+  `--drain` instead drains and stops the running service, keeps admission closed
+  through startup/health checks, then resumes. A timeout aborts without cancelling work.
 * `rollback` selects `previous` through the same checks. The service must be
-  drained and stopped first. SIGKILL or power loss can interrupt an operation;
+  drained and stopped first, or use `--drain`. SIGKILL or power loss can interrupt an operation;
   `previous` is recorded before switching so a recovery target remains.
 
-Stage operations can run while the proxy is busy. Activation requires a real
-maintenance window until admission control and draining exist. The release tool
+Stage operations can run while the proxy is busy. The first upstream-to-fork
+activation requires an externally enforced idle maintenance window. Later
+maintenance-aware builds support automatic drainage. The release tool
 cannot export the upstream process's in-memory bindings; affinity-aware builds
 restore their own checkpoints on later restarts. No live deployment has been
 verified yet.
@@ -127,7 +133,7 @@ python3 scripts/fork_release.py adopt \
 
 Then prepare the one-time systemd override described above, preserving all
 original arguments and environment. Do not reload/restart it while work is
-active. For later updates:
+active. For the first transition from upstream:
 
 ```sh
 python3 scripts/fork_release.py stage \
@@ -148,6 +154,9 @@ Keep an independent SSH recovery channel. Before either stop, ensure clients
 will not submit new work during the maintenance window. If startup or rollback
 cannot be verified, inspect local service state; do not assume the endpoint is
 healthy from a symlink alone.
+
+For subsequent fork updates, replace the manual stop with `activate --drain`
+or `rollback --drain`; see [maintenance and recovery](FORK_MAINTENANCE.md).
 
 ### Build and publish
 
@@ -174,8 +183,8 @@ apply action. It should perform this sequence:
    Do not start two OAuth-refresh writers against the production credential
    directory or refresh copied production tokens during staging.
 4. Stop admission of new inference work and drain active work using a verified
-   mechanism. Until an admission/drain mechanism exists, use an observed idle
-   maintenance window; a single idle connection snapshot is not a race-free
+   mechanism. For the first upstream transition, enforce an idle window
+   externally; a single idle connection snapshot is not a race-free
    guarantee. Abort rather than force interruption when work remains active.
 5. Switch the symlink atomically, restart only the proxy service, and verify the
    expected binary, listener and authenticated management health.

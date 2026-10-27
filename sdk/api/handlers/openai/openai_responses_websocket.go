@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/maintenance"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -335,6 +336,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 	}
 
+	turnDone := func() {}
+	defer func() { turnDone() }()
 	var wsTerminateErr error
 	defer func() {
 		releaseResponsesWebsocketToolCaches(downstreamSessionKey)
@@ -419,7 +422,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		pinnedAuthID = ""
 	}
 
+	maintenance.ReleaseRequest(socketCtx)
 	for {
+		turnDone()
 		var msgType int
 		var payload []byte
 		var errReadMessage error
@@ -447,6 +452,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
+		}
+		var errAdmission error
+		turnDone, errAdmission = maintenance.BeginTurn(socketCtx)
+		if errAdmission != nil {
+			turnDone = func() {}
+			_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
+				StatusCode: http.StatusServiceUnavailable, Error: errAdmission,
+			})
+			return
 		}
 		// log.Infof(
 		// 	"responses websocket: downstream_in id=%s type=%d event=%s payload=%s",
