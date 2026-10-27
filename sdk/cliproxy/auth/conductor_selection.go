@@ -432,6 +432,11 @@ func (m *Manager) SetSelector(selector Selector) {
 		m.mu.Unlock()
 		return
 	}
+	if oldAffinity, ok := oldSelector.(*SessionAffinitySelector); ok {
+		if newAffinity, ok := selector.(*SessionAffinitySelector); ok {
+			newAffinity.shareAffinityFrom(oldAffinity)
+		}
+	}
 	m.selector = selector
 	m.mu.Unlock()
 

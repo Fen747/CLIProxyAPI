@@ -408,7 +408,9 @@ func (c *SessionCache) Stop() {
 }
 
 func (c *SessionCache) cleanupLoop() {
+	c.mu.RLock()
 	interval := c.ttl / 2
+	c.mu.RUnlock()
 	if interval < time.Millisecond {
 		interval = time.Millisecond
 	}

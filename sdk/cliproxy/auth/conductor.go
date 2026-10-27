@@ -170,6 +170,7 @@ type Manager struct {
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex
+	affinityPersistMu         sync.Mutex
 	configCooldownMu          sync.Mutex
 	syncSchedulerMu           sync.Mutex
 	structuralEpoch           atomic.Uint64

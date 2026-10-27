@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -913,6 +914,8 @@ type SessionAffinitySelector struct {
 	fallback          Selector
 	cache             *SessionCache
 	matcher           *cliproxysession.MerklePrefixMatcher
+	affinityRefs      *atomic.Int32
+	stopOnce          sync.Once
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
 }
@@ -1069,10 +1072,13 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		subagentAffinity = *cfg.SubagentAffinity
 	}
 	rebindOnQuotaOnly := normalizeSessionAffinityRebindOn(cfg.RebindOn) == SessionAffinityRebindOnQuota
+	refs := &atomic.Int32{}
+	refs.Store(1)
 	return &SessionAffinitySelector{
 		fallback:          cfg.Fallback,
 		cache:             NewSessionCache(cfg.TTL),
 		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
+		affinityRefs:      refs,
 		subagentAffinity:  subagentAffinity,
 		rebindOnQuotaOnly: rebindOnQuotaOnly,
 	}
@@ -1498,12 +1504,17 @@ func (s *SessionAffinitySelector) Stop() {
 	if s == nil {
 		return
 	}
-	if s.cache != nil {
-		s.cache.Stop()
-	}
-	if s.matcher != nil {
-		s.matcher.Clear()
-	}
+	s.stopOnce.Do(func() {
+		if s.affinityRefs != nil && s.affinityRefs.Add(-1) != 0 {
+			return
+		}
+		if s.cache != nil {
+			s.cache.Stop()
+		}
+		if s.matcher != nil {
+			s.matcher.Clear()
+		}
+	})
 }
 
 // InvalidateAuth removes all session bindings for a specific auth.
