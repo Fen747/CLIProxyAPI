@@ -22,6 +22,9 @@ type sessionAffinityStateFile struct {
 // shareAffinityFrom keeps in-flight results attached to the same caches after a
 // routing change. Ownership is retained before the replaced selector is stopped.
 func (s *SessionAffinitySelector) shareAffinityFrom(old *SessionAffinitySelector) {
+	if s.initialQuota != nil && old.initialQuota != nil {
+		s.initialQuota = old.initialQuota
+	}
 	if old.affinityRefs == nil || old.cache == nil || old.matcher == nil {
 		return
 	}

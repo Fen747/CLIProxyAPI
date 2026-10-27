@@ -99,6 +99,10 @@ type Service struct {
 	// cooldownStateStore persists runtime cooldown state when enabled.
 	cooldownStateStore coreauth.CooldownStateStore
 
+	quotaMu     sync.Mutex
+	quotaCancel context.CancelFunc
+	quotaDone   chan struct{}
+
 	affinityMu     sync.Mutex
 	affinityCancel context.CancelFunc
 	affinityDone   chan struct{}

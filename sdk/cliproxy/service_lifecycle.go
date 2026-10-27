@@ -125,6 +125,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// legacy clients removed; no caches to refresh
 
+	s.startQuotaObserver(ctx)
 	s.ensureWebsocketGateway()
 	if homeEnabled {
 		s.registerAvailableExecutors(ctx, executorRegistrationOptions{
@@ -327,6 +328,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			watcherCancel()
 		}
 		if s.coreManager != nil {
+			s.stopQuotaObserver()
 			s.stopAffinityPersistence()
 			s.coreManager.StopAutoRefresh()
 		}

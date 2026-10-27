@@ -18,7 +18,7 @@ func readClaudeOAuthResponseBody(resp *http.Response) ([]byte, error) {
 	if resp == nil || resp.Body == nil {
 		return nil, fmt.Errorf("read Claude OAuth response: body is nil")
 	}
-	encoded, errRead := io.ReadAll(resp.Body)
+	encoded, errRead := readBoundedClaudeOAuthBody(resp.Body)
 	if errRead != nil {
 		return nil, errRead
 	}
@@ -60,7 +60,7 @@ func decodeClaudeOAuthEncoding(encoded []byte, encoding string) ([]byte, error) 
 	default:
 		return nil, fmt.Errorf("decode Claude OAuth response: unsupported content encoding %q", encoding)
 	}
-	decoded, errDecoded := io.ReadAll(reader)
+	decoded, errDecoded := readBoundedClaudeOAuthBody(reader)
 	if errDecoded != nil {
 		_ = reader.Close()
 		return nil, fmt.Errorf("decode Claude OAuth %s response: %w", encoding, errDecoded)
@@ -69,4 +69,17 @@ func decodeClaudeOAuthEncoding(encoded []byte, encoding string) ([]byte, error) 
 		return nil, fmt.Errorf("close Claude OAuth %s decoder: %w", encoding, errClose)
 	}
 	return decoded, nil
+}
+
+// Bound both encoded and each decoded stage to prevent oversized control-plane bodies.
+func readBoundedClaudeOAuthBody(reader io.Reader) ([]byte, error) {
+	const limit = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > limit {
+		return nil, fmt.Errorf("Claude OAuth response exceeds size limit")
+	}
+	return data, nil
 }
