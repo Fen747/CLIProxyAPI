@@ -21,7 +21,11 @@ func primingTestSetup(t *testing.T) (*quotaPrimer, *config.Config, *coreauth.Ini
 	m := coreauth.NewManager(nil, newRoutingSelector(normalizedRoutingRuntimeState(cfg)), nil)
 	t.Cleanup(m.StopAutoRefresh)
 	for _, id := range []string{"a", "b"} {
-		_, err := m.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{ID: id, Provider: "claude", Metadata: map[string]any{"access_token": "private-token", "account_uuid": "same-subscription"}})
+		identityKey, identity := "account_uuid", "same-subscription"
+		if id == "b" {
+			identityKey, identity = "accountUuid", " same-subscription "
+		}
+		_, err := m.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{ID: id, Provider: "claude", Metadata: map[string]any{"access_token": "private-token", identityKey: identity}})
 		if err != nil {
 			t.Fatal(err)
 		}

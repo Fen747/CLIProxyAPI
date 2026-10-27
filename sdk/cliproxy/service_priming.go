@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -55,7 +56,7 @@ func primingEnabled(cfg *config.Config) bool {
 // files for the same subscription. Neither tokens nor account identifiers are persisted.
 func primingSubscriptionKey(a *coreauth.Auth) string {
 	identity := a.ID
-	if id, ok := a.Metadata["account_uuid"].(string); ok && id != "" {
+	if id := helps.ClaudeCredentialAccountUUID(a); id != "" {
 		identity = id
 	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte("claude:"+identity)))
