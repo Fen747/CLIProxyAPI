@@ -17,8 +17,9 @@ compatibility; do not deploy upstream `main` automatically.
 ## Current evidence
 
 The authenticated management API confirmed version 8.0.29, a loopback listener,
-an external file-based OAuth directory, `fill-first`, session affinity enabled,
-and active Claude and Codex credentials.
+an external file-based OAuth directory, and session affinity enabled. The
+2026-10-27 check reported `weighted-round-robin`, two active Claude credentials
+and one active Codex credential.
 
 Existing operator records describe a Linux amd64 no-plugin executable managed
 by a systemd user service, separate configuration/state directories, and a
@@ -29,6 +30,11 @@ Python 3.12. Configuration and credential directory permissions were checked;
 the service was active with connections on its loopback listener. No restart or
 deployment was performed. Recheck live activity before deployment. Keep hostnames,
 keys, account identifiers and private host evidence outside this public fork.
+
+The release tool's read-only adoption plan verified the installed binary without
+creating its release root. Its systemd guard rejected the active live service.
+All 18 release-operation tests also passed in an isolated temporary WSL directory;
+these tests simulate activation and rollback, rather than restarting the live service.
 
 ## Replacement assessment
 

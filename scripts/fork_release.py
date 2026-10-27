@@ -232,10 +232,10 @@ class Releases:
                 service.stop()
                 service.require_stopped(self.root / "current" / "cli-proxy-api")
                 self.link("current", previous)
-                service.start()
-                health(self.installed(previous))
                 if old_previous is not None:
                     self.link("previous", old_previous)
+                service.start()
+                health(self.installed(previous))
                 raise RuntimeError("Candidate failed; previous release restored and healthy") from error
         return {"action": "activate", "from": previous, "release": release, "apply": True, "changed": True}
 

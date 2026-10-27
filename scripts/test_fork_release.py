@@ -171,6 +171,16 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(token.read_text(), "refreshed token")
         self.assertEqual(service.events, ["start", "stop", "start"])
 
+        service.stop()
+        def unhealthy_restore(manifest):
+            health(manifest)
+            raise RuntimeError("unhealthy restore")
+
+        with self.assertRaisesRegex(RuntimeError, "unhealthy restore"):
+            self.manager.activate(candidate, service, unhealthy_restore, apply=True)
+        self.assertEqual(self.manager.target("current"), original)
+        self.assertEqual(self.manager.target("previous"), older)
+
     def test_failure_to_stop_candidate_does_not_repoint_its_executable(self):
         original = self.adopted()
         candidate = self.staged()
