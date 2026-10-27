@@ -99,6 +99,11 @@ type Service struct {
 	// cooldownStateStore persists runtime cooldown state when enabled.
 	cooldownStateStore coreauth.CooldownStateStore
 
+	affinityMu     sync.Mutex
+	affinityCancel context.CancelFunc
+	affinityDone   chan struct{}
+	affinitySave   func() error
+
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
 

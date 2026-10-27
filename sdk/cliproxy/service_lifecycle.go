@@ -89,6 +89,7 @@ func (s *Service) Run(ctx context.Context) error {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
 		s.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), cfg)
+		s.startAffinityPersistence(ctx, cfg)
 		if cfg != nil && cfg.SaveCooldownStatus {
 			if errRestoreCooldown := s.coreManager.RestoreCooldownStates(ctx); errRestoreCooldown != nil {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
@@ -325,6 +326,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			watcherCancel()
 		}
 		if s.coreManager != nil {
+			s.stopAffinityPersistence()
 			s.coreManager.StopAutoRefresh()
 		}
 		if watcher := s.currentWatcher(); watcher != nil {
