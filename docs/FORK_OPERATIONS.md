@@ -4,7 +4,9 @@
 
 This fork adds a place to maintain subscription-aware routing without changing
 client endpoints or enrolling existing accounts again. No routing changes or
-deployment have been performed as part of this assessment.
+deployment have been performed. The first implementation adds release packaging
+and a host-local release tool; automatic request draining and durable affinity
+remain separate work.
 
 The `fleet` branch starts at upstream `v8.0.29`, commit
 `5fc580b1d72d87a7bcfe5cfb6f479c1aea5625b3`, matching the inspected running
@@ -15,17 +17,24 @@ compatibility; do not deploy upstream `main` automatically.
 ## Current evidence
 
 The authenticated management API confirmed version 8.0.29, a loopback listener,
-an external file-based OAuth directory, `fill-first`, session affinity enabled,
-and one active Claude credential plus one active Codex credential.
+an external file-based OAuth directory, and session affinity enabled. The
+2026-10-27 check reported `weighted-round-robin`, two active Claude credentials
+and one active Codex credential.
 
 Existing operator records describe a Linux amd64 no-plugin executable managed
 by a systemd user service, separate configuration/state directories, and a
-private HTTPS endpoint forwarded to its loopback port. The operator's SSH
-transport timed out during this assessment. The current service unit, executable
-checksum, filesystem permissions and active connections have therefore **not**
-been independently rechecked on the host. Do that before deployment. Keep
-hostnames, keys, account identifiers and private host evidence outside this
-public fork.
+private HTTPS endpoint forwarded to its loopback port. A read-only SSH audit on
+2026-10-27 confirmed the running systemd user service, its original versioned
+executable path, matching on-disk/running executable checksums, Linux x86-64 and
+Python 3.12. Configuration and credential directory permissions were checked;
+the service was active with connections on its loopback listener. No restart or
+deployment was performed. Recheck live activity before deployment. Keep hostnames,
+keys, account identifiers and private host evidence outside this public fork.
+
+The release tool's read-only adoption plan verified the installed binary without
+creating its release root. Its systemd guard rejected the active live service.
+All 19 release-operation tests also passed in an isolated temporary WSL directory;
+these tests simulate activation and rollback, rather than restarting the live service.
 
 ## Replacement assessment
 
@@ -69,7 +78,83 @@ Publish a pinned Linux amd64 no-plugin artifact, build version/commit/date and
 SHA256 checksum. Use distinct fork release identifiers. A dedicated fork
 release workflow should build only required targets and must not rely on the
 upstream DockerHub destination or credentials. The inherited release workflow
-is not yet a verified fork delivery pipeline.
+is disabled in this fork; the dedicated `fork-release` workflow is described below.
+
+## Implemented release operations
+
+`scripts/fork_release.py` uses Python 3.10+ and the standard library. Every command
+defaults to a read-only plan; `--apply` performs the operation. It never rewrites
+configuration, keys or OAuth files, installs a service override, or stops the
+currently serving process to initiate an update.
+
+* `adopt` verifies and copies the existing Linux executable into an immutable
+  baseline release and creates `current`. This does not change the process
+  already running from its original path. Supply the verified binary checksum,
+  observed version and full 40-character source commit. Release manifests require
+  full commit provenance; health responses may abbreviate that known commit.
+* `stage` verifies an explicit archive SHA256, an allowlisted three-file archive,
+  its manifest, executable architecture and binary checksum. It installs the
+  release, including its license notice, without selecting it. Repeating an
+  identical stage is harmless; replacing an existing release's contents is refused.
+* `activate` requires an **already stopped**, loaded systemd user service whose
+  `ExecStart` uses the managed `current/cli-proxy-api` path. A failed unit with
+  no main/control process also qualifies for recovery; start limits are reset
+  before starting a binary. The tool preserves a
+  `previous` target, switches `current` atomically and starts the service. An
+  authenticated loopback health check must report the expected version and
+  commit; a failed candidate is stopped and the previous binary restarted and
+  checked. If the candidate cannot be stopped, its link stays in place and the
+  command fails for operator recovery.
+* `rollback` selects `previous` through the same checks. The service must be
+  drained and stopped first. SIGKILL or power loss can interrupt an operation;
+  `previous` is recorded before switching so a recovery target remains.
+
+Stage operations can run while the proxy is busy. Activation requires a real
+maintenance window until admission control and draining exist. It does not
+preserve in-memory affinities. No live deployment has been verified yet.
+
+For the first adoption, run on the audited Linux host, substituting verified
+values for the uppercase placeholders:
+
+```sh
+python3 scripts/fork_release.py adopt \
+  --binary EXISTING_BINARY --sha256 EXISTING_BINARY_SHA256 \
+  --version 8.0.29 --commit EXISTING_COMMIT --apply
+```
+
+Then prepare the one-time systemd override described above, preserving all
+original arguments and environment. Do not reload/restart it while work is
+active. For later updates:
+
+```sh
+python3 scripts/fork_release.py stage \
+  --archive RELEASE_ARCHIVE --sha256 ARCHIVE_SHA256 --apply
+
+# After draining work, stop only the proxy's actual user service.
+systemctl --user stop ACTUAL_PROXY.service
+python3 scripts/fork_release.py activate --release RELEASE_ID \
+  --service ACTUAL_PROXY.service --management-key-file PRIVATE_MANAGEMENT_KEY --apply
+
+# During a subsequent maintenance window, if an explicit rollback is needed:
+systemctl --user stop ACTUAL_PROXY.service
+python3 scripts/fork_release.py rollback \
+  --service ACTUAL_PROXY.service --management-key-file PRIVATE_MANAGEMENT_KEY --apply
+```
+
+Keep an independent SSH recovery channel. Before either stop, ensure clients
+will not submit new work during the maintenance window. If startup or rollback
+cannot be verified, inspect local service state; do not assume the endpoint is
+healthy from a symlink alone.
+
+### Build and publish
+
+After merging into `fleet`, manually dispatch `fork-release` on that branch with
+a new version such as `8.0.29-fleet.1`. It builds the checked-out commit for Linux
+amd64 with `CGO_ENABLED=0`, without refreshing catalogs from another repository.
+It tests the release tool, smoke-stages the actual artifact, and publishes a
+`fleet-vVERSION` release with the archive, manifest inside it, checksums and the
+matching release tool. Existing tags are not overwritten; a failed publication
+can leave a draft for inspection. Publishing never deploys the release.
 
 ## Deployment transaction
 
